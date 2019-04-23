@@ -1,0 +1,22 @@
+What type of model should we be using?
+I know about ELMo and Bert, are there others we could try out? How tough are the APIs?
+
+We were talking about doing part of speech tagging of syntax nodes through LSTMs. Any idea how we should go about that?
+In addition, the professor said he wants to know what type of tags we plan to use. Is that referring to part of speech tagging?
+
+We want to change around some of the stuff from the buzzer.py file, but we are not really sure which areas to tackle. 
+Could you point us in the right direction for that?
+
+What should we do to get the bare minimum part of the project working so we can start working on some cool stuff?
+
+When we download our dataset, do we have to parse it in a specific way? I was wondering because it seems like the training data was 
+already in the form of questions
+
+
+TASKS:
+Learn to submit on CodaLab
+Figure out the dataset we are using
+Determine how to make our training data into word embeddings?
+Figure out how to use it to train on our data
+Figure out the model we intend to use
+Figure out how we are going to implement tagging into our project
