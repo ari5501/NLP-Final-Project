@@ -2,6 +2,10 @@ from typing import List, Optional, Tuple
 from collections import defaultdict
 import pickle
 import json
+import torch
+import torch.nn as nn
+import pandas as pd
+import numpy as np
 from os import path
 
 import click
@@ -11,6 +15,8 @@ from flask import Flask, jsonify, request
 
 from qanta import util
 from qanta.dataset import QuizBowlDataset
+
+from keras.preprocessing.text import text_to_word_sequence
 
 
 MODEL_PATH = 'tfidf.pickle'
@@ -90,8 +96,52 @@ class TfidfGuesser:
             guesser.i_to_ans = params['i_to_ans']
             return guesser
 
+class LSTMGuesser:
+    def __init__(self, n_input=10, n_hidden=50, n_output=2, dropout=0.5):
+        super(LSTMGuesser, self).__init__()
+        self.n_input = n_input
+        self.n_hidden = n_hidden
+        self.dropout = dropout
+        self.n_output = n_output
+
+        self.word_embedding = nn.Embedding(5000, 50)
+        self.embedding_features = pd.DataFrame()
+        self.lstm = nn.LSTM(n_input, n_hidden)
+        self.hidden = nn.Linear(n_hidden, n_output)
+
+    def train(self, training_data):
+        questions = training_data[0]
+        answers = training_data[1]
+        answer_docs = defaultdict(str)
+        for q, ans in zip(questions, answers):
+            text = ' '.join(q)
+            answer_docs[ans] += ' ' + text
+
+        x_array = []
+        y_array = []
+        for ans, doc in answer_docs.items():
+            x_array.append(doc)
+            y_array.append(ans)
+
+        # Trying to do stuff with word embeddings
+        for document in text:
+            words = text_to_word_sequence(document)[0:20] 
+            feature_vector = []
+            for word in words:
+                feature_vector = np.append(feature_vector, 
+                                        np.array(embeds[word]))
+            zeroes_to_add = array_length - len(feature_vector)
+            feature_vector = np.append(feature_vector, 
+                                    np.zeros(zeroes_to_add)
+                                    ).reshape((1,-1))
+            
+            # Append the document feature vector to the feature table
+            embedding_features = embedding_features.append( 
+                                     pd.DataFrame(feature_vector))
+
 
 def create_app(enable_batch=True):
+    lstm_guesser = LSTMGuesser(); 
     tfidf_guesser = TfidfGuesser.load()
     app = Flask(__name__)
 
