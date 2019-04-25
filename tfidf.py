@@ -2,6 +2,7 @@ from typing import List, Optional, Tuple
 from collections import defaultdict
 import pickle
 import json
+import nltk
 import torch
 import torch.nn as nn
 import pandas as pd
@@ -23,6 +24,8 @@ MODEL_PATH = 'tfidf.pickle'
 BUZZ_NUM_GUESSES = 10
 BUZZ_THRESHOLD = 0.3
 
+kUNK = '<unk>'
+kPAD = '<pad>'
 
 def guess_and_buzz(model, question_text) -> Tuple[str, bool]:
     guesses = model.guess([question_text], BUZZ_NUM_GUESSES)[0]
@@ -46,6 +49,9 @@ class TfidfGuesser:
         self.tfidf_vectorizer = None
         self.tfidf_matrix = None
         self.i_to_ans = None
+        self.vocab = None
+        self.w_to_i = None
+        self.i_to_w = None
 
     def train(self, training_data) -> None:
         questions = training_data[0]
@@ -54,6 +60,9 @@ class TfidfGuesser:
         for q, ans in zip(questions, answers):
             text = ' '.join(q)
             answer_docs[ans] += ' ' + text
+        
+        # Building the vocabulary
+        self.vocab, self.w_to_i, self.i_to_w = load_words(zip(questions, answers))
 
         x_array = []
         y_array = []
@@ -62,8 +71,29 @@ class TfidfGuesser:
             y_array.append(ans)
 
         self.i_to_ans = {i: ans for i, ans in enumerate(y_array)}
+
+        data = []
+        for i in range(len(x_array)):
+            sentences = nltk.sent_tokenize(x_array[i])
+            for s in sentences:
+                question = s.split()
+                label = i
+                data.append((question, label))
+
+        vocab, word2ind, ind2word = dan.load_words(data)
+
+        model = dan.DanModel(len(answer_docs.items()), len(vocab))
+        train = dan.Question_Dataset(data, word2ind)
+        train_sampler = torch.utils.data.sampler.SequentialSampler(dev_dataset)
+        
+        dev_dataset = dan.Question_Dataset(data, word2ind)
+        dev_sampler = torch.utils.data.sampler.SequentialSampler(dev_dataset)
+        dev_loader = torch.utils.data.DataLoader(dev_dataset, batch_size=256,
+                                               sampler=dev_sampler, num_workers=0,
+                                               collate_fn=dan.batchify)
+
         self.tfidf_vectorizer = TfidfVectorizer(
-            ngram_range=(1, 3), min_df=2, max_df=.9
+            ngram_range=(1, 1), min_df=2, max_df=.9
         ).fit(x_array)
         self.tfidf_matrix = self.tfidf_vectorizer.transform(x_array)
 
@@ -96,52 +126,108 @@ class TfidfGuesser:
             guesser.i_to_ans = params['i_to_ans']
             return guesser
 
-class LSTMGuesser:
-    def __init__(self, n_input=10, n_hidden=50, n_output=2, dropout=0.5):
-        super(LSTMGuesser, self).__init__()
-        self.n_input = n_input
-        self.n_hidden = n_hidden
-        self.dropout = dropout
-        self.n_output = n_output
-
-        self.word_embedding = nn.Embedding(5000, 50)
-        self.embedding_features = pd.DataFrame()
-        self.lstm = nn.LSTM(n_input, n_hidden)
-        self.hidden = nn.Linear(n_hidden, n_output)
-
-    def train(self, training_data):
-        questions = training_data[0]
-        answers = training_data[1]
-        answer_docs = defaultdict(str)
-        for q, ans in zip(questions, answers):
-            text = ' '.join(q)
-            answer_docs[ans] += ' ' + text
-
-        x_array = []
-        y_array = []
-        for ans, doc in answer_docs.items():
-            x_array.append(doc)
-            y_array.append(ans)
-
-        # Trying to do stuff with word embeddings
-        for document in text:
-            words = text_to_word_sequence(document)[0:20] 
-            feature_vector = []
-            for word in words:
-                feature_vector = np.append(feature_vector, 
-                                        np.array(embeds[word]))
-            zeroes_to_add = array_length - len(feature_vector)
-            feature_vector = np.append(feature_vector, 
-                                    np.zeros(zeroes_to_add)
-                                    ).reshape((1,-1))
-            
-            # Append the document feature vector to the feature table
-            embedding_features = embedding_features.append( 
-                                     pd.DataFrame(feature_vector))
 
 
+class DanGuesser(nn.Module):
+    """High level model that handles intializing the underlying network
+    architecture, saving, updating examples, and predicting examples.
+    """
+
+    #### You don't need to change the parameters for the model for passing tests, 
+    #### might need to tinker to improve performance/handle
+    #### pretrained word embeddings/for your project code.
+
+
+    def __init__(self, n_classes, vocab_size, emb_dim=50,
+                 n_hidden_units=50, nn_dropout=.5):
+        super(DanGuesser, self).__init__()
+        self.n_classes = n_classes
+        self.vocab_size = vocab_size
+        self.emb_dim = emb_dim
+        self.n_hidden_units = n_hidden_units
+        self.nn_dropout = nn_dropout
+        self.embeddings = nn.Embedding(self.vocab_size, self.emb_dim, padding_idx=0)
+        self.linear1 = nn.Linear(emb_dim, n_hidden_units)
+        self.linear2 = nn.Linear(n_hidden_units, n_classes)
+
+        self.classifier = nn.Sequential(
+            self.linear1,
+            nn.ReLU(),
+            nn.Dropout(),
+            self.linear2
+        )
+
+        self._softmax = nn.Softmax()
+       
+    def train(self, training_data) -> None:
+
+    def forward(self, input_text, text_len, is_prob=False):
+        """
+        Keyword arguments:
+        input_text : vectorized question text 
+        text_len : batch * 1, text length for each question
+        is_prob: if True, output the softmax of last layer
+        """
+        logits = torch.LongTensor([0.0] * self.n_classes)
+
+        text_embed = self.embeddings(input_text)
+
+        text_encode = text_embed.sum(1)
+        text_encode /= text_len.view(text_embed.size(0),-1)
+
+        logits = self.classifier(text_encode)
+
+        if is_prob:
+            return self._softmax(logits)
+        else:
+            return logits
+
+    def guess(self, questions: List[str], max_n_guesses: Optional[int]) -> List[List[Tuple[str, float]]]:
+
+    def save(self):
+        with open(MODEL_PATH, 'wb') as f:
+            pickle.dump({
+                'i_to_ans': self.i_to_ans,
+                'tfidf_vectorizer': self.tfidf_vectorizer,
+                'tfidf_matrix': self.tfidf_matrix
+            }, f)
+
+    @classmethod
+    def load(cls):
+        with open(MODEL_PATH, 'rb') as f:
+            params = pickle.load(f)
+            guesser = DanGuesser()
+            guesser.tfidf_vectorizer = params['tfidf_vectorizer']
+            guesser.tfidf_matrix = params['tfidf_matrix']
+            guesser.i_to_ans = params['i_to_ans']
+            return guesser
+
+
+def load_words(exs):
+    """
+    vocabuary building
+    Keyword arguments:
+    exs: list of input questions-type pairs
+    """
+
+    words = set()
+    word2ind = {kPAD: 0, kUNK: 1}
+    ind2word = {0: kPAD, 1: kUNK}
+    for q_text, _ in exs:
+        for w in q_text:
+            words.add(w)
+    words = sorted(words)
+    for w in words:
+        idx = len(word2ind)
+        word2ind[w] = idx
+        ind2word[idx] = w
+    words = [kPAD, kUNK] + words
+    return words, word2ind, ind2word
+
+
+# Begin the part where we don't change anything
 def create_app(enable_batch=True):
-    lstm_guesser = LSTMGuesser(); 
+    dan_guesser = DanGuesser()
     tfidf_guesser = TfidfGuesser.load()
     app = Flask(__name__)
 
