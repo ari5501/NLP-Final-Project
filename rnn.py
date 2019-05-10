@@ -13,16 +13,17 @@ import torch
 import torch.nn as nn
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
-
-import numpy as np
+#import gensim
+#from gensim.models import KeyedVectors
 
 import click
-from tqdm import tqdm
+import numpy as np
+
 from sklearn.feature_extraction.text import TfidfVectorizer
 from flask import Flask, jsonify, request
 
-from qanta import util
-from qanta.dataset import QuizBowlDataset
+from . import util
+from .dataset import QuizBowlDataset
 
 
 MODEL_PATH = 'rnn.pickle'
@@ -31,7 +32,7 @@ BUZZ_THRESHOLD = 0.3
 
 
 def guess_and_buzz(model, question_text) -> Tuple[str, bool]:
-    guesses = model.guess([question_text], BUZZ_NUM_GUESSES)[0]
+    guesses = guess(model, [question_text], BUZZ_NUM_GUESSES)[0]
     scores = [guess[1] for guess in guesses]
     buzz = scores[0] / sum(scores) >= BUZZ_THRESHOLD
     return guesses[0][0], buzz
@@ -48,50 +49,79 @@ def batch_guess_and_buzz(model, questions) -> List[Tuple[str, bool]]:
 
 
 #You need to write code inside functions of this class
-class RNNGuesser(nn.Module):
+class LSTMGuesser(nn.Module):
     """.
     We use a LSTM for our guesser.
     """
 
     # n_input represents dimensionality of each word embedding as a vector 
     # n_output is number of answers (unique)
-    def __init__(self, n_input = 10, n_hidden = 50, n_output = 2, dropout = 0.5):
-        super(RNNGuesser, self).__init__()
+    def __init__(self, n_input = 1000, n_hidden = 50, n_output = 300, dropout = 0.5):
+        super(LSTMGuesser, self).__init__()
         
         self.n_input = n_input  # size of longest question
-        self.n_hidden = n_hidden
-        self.n_output = n_output # amount of answers
-        self.dropout = dropout
+        self.n_hidden = n_hidden # This is a hyperparameter so it could be anything
+        self.n_output = n_output # amount of answers unique answers / classes
 
         self.lstm = nn.LSTM(self.n_input, self.n_hidden)
-        self.hidden = nn.Linear(self.n_hidden, self.n_output)
+        self.dropout = nn.Dropout(dropout)
+        self.hidden = nn.Linear(self.n_hidden, self.n_output) # this layer might not be needed
 
-        # Initalize these randomly, but we need to change them around in the foroward pass
-        self.weights # figure out what these are supposed to be initialized to and 
-        self.bias    # their dimensions
+        self.embeddings = None
 
 
     # Model forward pass, returns the logits of the predictions.
     def forward(self, question_text, question_len):
-        # Need a sequence of vectors as an input
         print("In the forward method")
 
-        #get the batch size and sequence length (max length of the batch)
-        batch_size, seq_len, _ = question_text.size()
-        
         #Get the output of LSTM - (output dim: batch_size x batch_max_len x lstm_hidden_dim)
         output, _ = self.lstm(question_text)
+
+        # Pass through a dropout layer
+        out = self.dropout(output)
         
         #reshape (before passing to linear layer) so that each row contains one token 
         #essentially, flatten the output of LSTM 
         #dim will become batch_size*batch_max_len x lstm_hidden_dim
-        reshape = output.contiguous().view(-1, output.size(2))
+        reshape = out.contiguous().view(-1, output.size(2))
         
         #Get logits from the final linear layer
         logits = self.hidden_to_label(reshape)
         
         #--shape of logits -> (batch_size, seq_len, self.n_output)
         return logits
+
+    # Saves the function after it is finished training so we don't have to do this all over again
+    def save(self):
+        with open('rnn.pickle', 'wb') as f:
+            pickle.dump({
+                'lstm' : self.lstm,
+                'dropout' : self.dropout,
+                'hidden' : self.hidden,
+                'embeddings' : self.embeddings
+            }, f)
+    
+    def load(self):
+        with open('rnn.pickle', 'wb') as f:
+            params = pickle.load(f)
+            guesser = LSTMGuesser()
+            guesser.lstm = params['lstm']
+            guesser.dropout = params['dropout']
+            guesser.hidden = params['hidden']
+            guesser.embeddings = params['embeddings']
+            return guesser
+
+# Get label that corresponds to the maximum logit
+def guess(model, questions_text, max_guesses):
+    print("I will figure out what to do here later")
+    # turn question text into feature vector - turn it into an array of tensors with the embeddings
+
+    # put feature vector into the model - model(feature_vector, length)
+
+    # the logits returned would be an array of all the labels, and we want the maximum value
+
+    # figure out what the best label correpsonds to
+
 
 
 def train_model(model, checkpoint, grad_clippings, save_name, train_data_loader, dev_data_loader, accuraacy, device):
@@ -117,8 +147,8 @@ def train_model(model, checkpoint, grad_clippings, save_name, train_data_loader,
         question_len = batch['len']
         labels = batch['labels']
 
-        optimizer.zero_grad()
         out = model(question_text, question_len)
+        optimizer.zero_grad()
         loss = criterion(out, labels)
         loss.backward()
         optimizer.step()
@@ -144,7 +174,7 @@ def get_data_info(training_data, embeddings):
     questions = training_data[0]
     answers = training_data[1]
 
-    questions_vector = [] # 3d array to represent the question vector
+    questions_vector = np.array([]) # 3d array to represent the question vector
     answer_vector = {} # We just map the answers to a unique index
     
     idx = 0
@@ -155,19 +185,32 @@ def get_data_info(training_data, embeddings):
     # tokenize the question and get it into a list of words, get the embedding of each word,
     # store that embedding for the word in a list, and go on to the next part
     for question in questions:
-        question_embedding = []
-        tokens = question.rstrip().split(' ')
-        for token in tokens:
-            question_embedding.append(embeddings[token])
-        question_embedding = np.asarrary(question_embedding)
-        questions_vector.append(question_embedding)
-    
-    questions_vector = np.asarray(questions_vector) # converting to numpy array
+        question_embedding = np.array([])
+        for sentences in question:
+            tokens = sentences.rstrip().split(' ')
+            #print (tokens)
+            for token in tokens:
+                if token in embeddings:
+                    fast_text_embedding = np.fromiter(embeddings[token], dtype=np.int)
+                    fast_text_tensor = torch.from_numpy(fast_text_embedding)
+                    question_embedding = np.append(question_embedding,fast_text_tensor) 
+                else: # this does not work
+                    fast_text_embedding = np.fromiter(embeddings['primordial'], dtype=np.int)
+                    fast_text_tensor = torch.from_numpy(fast_text_embedding)
+                    question_embedding = np.append(question_embedding,fast_text_tensor) 
 
+        #question_embedding = torch.FloatTensor(question_embedding)
+        question_embedding = torch.from_numpy(question_embedding)
+        questions_vector = np.append(questions_vector, question_embedding)
+    
     # Todo: Convert the 3d numpy array into a 3d tensor
+    tensor = torch.from_numpy(questions_vector).float()
+
+    print("Type of tensor is ", type(tensor))
+    print("Tensor dimensions are: ", tensor.size())
 
     full_data = []
-    full_data.append(questions_vector)
+    full_data.append(tensor)
     full_data.append(answer_vector)
     
     return full_data
@@ -175,8 +218,11 @@ def get_data_info(training_data, embeddings):
 # Loads the embeddings if they already exist or saves them now
 def load_embeddings():
     # Checking if we have already loaded the vectors before
+    dirpath = os.getcwd()
+    print("current directory is : " + dirpath)
     exists = os.path.isfile('embeddings.pickle')
     if exists:
+        print("Attempting to load embeddings")
         with open('embeddings.pickle', 'rb') as f:
             params = pickle.load(f)
             embeddings = params['fast_text_embeddings']
@@ -184,7 +230,8 @@ def load_embeddings():
     else:
         # Getting the embeddings from FastText
         print("Attempting to create the embeddings")
-        embeddings = load_vectors("wiki-news-300d-1M.vec")
+        #embeddings = KeyedVectors.load_word2vec_format('wiki-news-300d-1m.vec', limit=200000)
+        embeddings = load_vectors_wo_w2v('wiki-news-300d-1M.vec')
         with open('embeddings.pickle', 'wb') as f:
             pickle.dump({
                 'fast_text_embeddings' : embeddings
@@ -192,15 +239,13 @@ def load_embeddings():
         print ("Embeddings have been created and saved in embeddings.pickle")
     return embeddings
 
-
 # Loads fasttext embeddings
-def load_vectors(fname):
+def load_vectors_wo_w2v(fname):
     Path(Path(os.getcwd()).parent).parent
     os.chdir('data/')
     dirpath = os.getcwd()
     print("current directory is : " + dirpath)
     print(os.listdir(os.curdir))
-
     fin = io.open(fname, 'r', encoding='utf-8', newline='\n', errors='ignore')
     n, d = map(int, fin.readline().split())
     data = {}
@@ -211,8 +256,9 @@ def load_vectors(fname):
         index += 1
         if index % 10000 == 0:
             print ("Up to ", index, " words")
+        if index >= 200000:
+            break
     return data
-
 
 # Getting the dev data for our pytorch model
 def get_dev_data(dataset):
@@ -229,7 +275,6 @@ def get_dev_data(dataset):
     return dev_examples, dev_pages, None
 
 
-# This probably neeeds to be changed since we didn't write it
 """
 Gather a batch of individual examples into one batch, 
 which includes the question text, question length and labels 
@@ -253,16 +298,15 @@ def batchify(batch):
     return q_batch
 
 
-# This probably also needs to be changed since we didn't write it
+"""
+evaluate the current model, get the accuracy for dev/test set
+Keyword arguments:
+data_loader: pytorch build-in data loader output
+model: model to be evaluated
+device: cpu of gpu
+"""
+# This needs to change, but Pranav said it shouldn't be too different
 def evaluate(data_loader, model, device):
-    """
-    evaluate the current model, get the accuracy for dev/test set
-    Keyword arguments:
-    data_loader: pytorch build-in data loader output
-    model: model to be evaluated
-    device: cpu of gpu
-    """
-
     model.eval()
     num_examples = 0
     error = 0
@@ -282,11 +326,11 @@ def evaluate(data_loader, model, device):
 
 
 
-### Begin app stuff that we didn't really write ###
+### Begin app stuff ###
 
 
 def create_app(enable_batch=True):
-    rnn_guesser = RNNGuesser.load()
+    rnn_guesser = LSTMGuesser.load()
     app = Flask(__name__)
 
     @app.route('/api/1.0/quizbowl/act', methods=['POST'])
@@ -347,12 +391,41 @@ def train():
     batch_size = 128
     save_name = 'rnn.pt'
 
-    # Getting fast text embeddings
-    embeddings = load_embeddings()
+    # Create the model
+    model = LSTMGuesser()
 
-    # Turning the dataset data into actual vectors
-    training_vectors = get_data_info(training_data, embeddings)
-    dev_vectors = get_data_info(dev_data, embeddings)
+    # Getting fast text embeddings
+    model.embeddings = load_embeddings()
+
+
+    # Creating/loading the train and dev vectors
+    train_exists = os.path.isfile('train_embeddings.pickle')
+    if train_exists:
+        print("Attempting to load training vectors")
+        with open('training_vectors.pickle', 'rb') as f:
+            params = pickle.load(f)
+            training_vectors = params['training_vectors']
+    else:
+        print ("Attempting to create training data vectors")
+        training_vectors = get_data_info(training_data, model.embeddings)
+        with open('training_vectors.pickle', 'wb') as f:
+            pickle.dump({
+                'training_vectors' : training_vectors
+            }, f)
+
+    dev_exists = os.path.isfile('dev_embeddings.pickle')
+    if dev_exists:
+        print("Attempting to loead dev vectors")
+        with open('dev_vectors.pickle', 'rb') as f:
+            params = pickle.load(f)
+            dev_vectors = params['dev_vectors']
+    else:
+        print ("Attempting to create dev vectors")
+        dev_vectors = get_data_info(dev_data, model.embeddings)
+        with open('dev_vectors.pickle', 'wb') as f:
+            pickle.dump({
+                'dev_vectors' : dev_vectors
+            }, f)
 
     # Determining if we are using cpu or gpu
     device = torch.cuda.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -367,9 +440,11 @@ def train():
 
     # Here we are actually running the guesser and training it
     accuracy = 0
-    model = RNNGuesser()
     train_model(model, checkpoint, grad_clippings, save_name, train_loader, dev_loader, accuracy, device)
-    #model.save()
+
+    # Save the model now
+    model.save()
+
 
 
 @cli.command()
