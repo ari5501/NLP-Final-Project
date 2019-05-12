@@ -2,6 +2,7 @@
 from typing import List, Optional, Tuple
 from collections import defaultdict
 import pickle
+import string
 import json
 import io
 import time
@@ -174,7 +175,7 @@ def get_data_info(training_data, embeddings):
     questions = training_data[0]
     answers = training_data[1]
 
-    questions_vector = np.array([]) # 3d array to represent the question vector
+    questions_vector = [] # 3d array to represent the question vector
     answer_vector = {} # We just map the answers to a unique index
     
     idx = 0
@@ -182,35 +183,65 @@ def get_data_info(training_data, embeddings):
         answer_vector[answer] = idx
         idx += 1
 
+    # For cleaning the data
+    table = str.maketrans('', '', string.punctuation)
+
+    count = 1
+
     # tokenize the question and get it into a list of words, get the embedding of each word,
     # store that embedding for the word in a list, and go on to the next part
     for question in questions:
-        question_embedding = np.array([])
-        for sentences in question:
-            tokens = sentences.rstrip().split(' ')
-            #print (tokens)
-            for token in tokens:
-                if token in embeddings:
-                    fast_text_embedding = np.fromiter(embeddings[token], dtype=np.int)
-                    fast_text_tensor = torch.from_numpy(fast_text_embedding)
-                    question_embedding = np.append(question_embedding,fast_text_tensor) 
-                else: # this does not work
-                    fast_text_embedding = np.fromiter(embeddings['primordial'], dtype=np.int)
-                    fast_text_tensor = torch.from_numpy(fast_text_embedding)
-                    question_embedding = np.append(question_embedding,fast_text_tensor) 
+        question_embedding = []
+        # do we want to separate by sentences somehow? I just got rid of the period
+        full_question = ''.join(str(sentence) for sentence in question)
+        #print (full_question)
+        tokens = full_question.replace('.', ' ')
+        tokens = tokens.rstrip().split(' ')
+        for token in tokens:
+            # cleaning data
+            token = token.translate(table)
+            token = token.lower()
 
-        #question_embedding = torch.FloatTensor(question_embedding)
-        question_embedding = torch.from_numpy(question_embedding)
-        questions_vector = np.append(questions_vector, question_embedding)
+            # putting each question vector in a list
+            if token in embeddings:
+                #print(token)
+                if type(embeddings[token]) == list:
+                    token_vector = embeddings[token]
+                else:
+                    token_vector = list(embeddings[token])
+                    embeddings[token] = token_vector
+                #print(token_vector)
+                #fast_text_tensor = torch.FloatTensor(token_vector)
+                #print (fast_text_tensor)
+                question_embedding.append(token_vector) 
+            else: # this does not work
+                #print(token)
+                if type(embeddings['primordial']) == list:
+                    token_vector = embeddings['primordial']
+                else:
+                    token_vector = list(embeddings['primordial'])
+                    embeddings['primordial'] = token_vector
+                #print(token_vector)
+                #fast_text_tensor = torch.FloatTensor(token_vector)
+                #print (fast_text_tensor)
+                question_embedding.append(token_vector) 
+
+        #print(question_embedding)
+        print ("About to add question #", count, " to the embeddings")
+        count += 1
+        #question_tensor = torch.stack(question_embedding)
+        #questions_vector.append(question_tensor)
+        question_embedding = torch.FloatTensor(question_embedding)
+        questions_vector.append(question_embedding)
     
-    # Todo: Convert the 3d numpy array into a 3d tensor
-    tensor = torch.from_numpy(questions_vector).float()
+    print("Attempting to stack the vectors")
+    tensor = torch.stack(questions_vector)
 
-    print("Type of tensor is ", type(tensor))
-    print("Tensor dimensions are: ", tensor.size())
+    #print("Type of tensor is ", type(tensor))
+    #print("Tensor dimensions are: ", tensor.size())
 
     full_data = []
-    full_data.append(tensor)
+    full_data.append(question_embedding)
     full_data.append(answer_vector)
     
     return full_data
@@ -399,7 +430,7 @@ def train():
 
 
     # Creating/loading the train and dev vectors
-    train_exists = os.path.isfile('train_embeddings.pickle')
+    train_exists = os.path.isfile('training_vectors.pickle')
     if train_exists:
         print("Attempting to load training vectors")
         with open('training_vectors.pickle', 'rb') as f:
@@ -413,7 +444,7 @@ def train():
                 'training_vectors' : training_vectors
             }, f)
 
-    dev_exists = os.path.isfile('dev_embeddings.pickle')
+    dev_exists = os.path.isfile('dev_vectors.pickle')
     if dev_exists:
         print("Attempting to loead dev vectors")
         with open('dev_vectors.pickle', 'rb') as f:
@@ -427,14 +458,19 @@ def train():
                 'dev_vectors' : dev_vectors
             }, f)
 
+    print("Training verctor shape is: ", training_vectors[0].shape)
+    print("Dev verctor shape is: ", dev_vectors[0].shape)
+
     # Determining if we are using cpu or gpu
-    device = torch.cuda.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device('cpu')
+    #device = torch.cuda.device("cuda:0" if torch.cuda.is_available() else "cpu:1")
 
     # Converting our training and dev data into dataloaders which work well with training our RNN
-    train_sampler = torch.utils.data.sampler.RandomSampler(training_vectors, device)
+    #train_sampler = torch.utils.data.sampler.RandomSampler(training_vectors, device)
+    train_sampler = torch.utils.data.sampler.RandomSampler(training_vectors)
     train_loader = DataLoader(training_vectors, batch_size=batch_size, sampler=train_sampler, num_workers=0,
                                            collate_fn=batchify)
-    dev_sampler = torch.utils.data.sampler.RandomSampler(dev_vectors, device)
+    dev_sampler = torch.utils.data.sampler.RandomSampler(dev_vectors)
     dev_loader = DataLoader(dev_vectors, batch_size=batch_size, sampler=dev_sampler, num_workers=0,
                                            collate_fn=batchify)
 
