@@ -7,6 +7,7 @@ import json
 import io
 import time
 import os
+#import bcolz
 from os import path
 from pathlib import Path
 
@@ -69,6 +70,7 @@ class LSTMGuesser(nn.Module):
         self.hidden = nn.Linear(self.n_hidden, self.n_output) # this layer might not be needed
 
         self.embeddings = None
+        self.i_to_w = None
 
 
     # Model forward pass, returns the logits of the predictions.
@@ -187,6 +189,9 @@ def get_data_info(training_data, embeddings):
     table = str.maketrans('', '', string.punctuation)
 
     count = 1
+    token_vector = list(embeddings['pizza'])
+    embeddings['pizza'] = token_vector
+    embedding_dim = len(embeddings['pizza'])
 
     # tokenize the question and get it into a list of words, get the embedding of each word,
     # store that embedding for the word in a list, and go on to the next part
@@ -204,33 +209,20 @@ def get_data_info(training_data, embeddings):
 
             # putting each question vector in a list
             if token in embeddings:
-                #print(token)
                 if type(embeddings[token]) == list:
                     token_vector = embeddings[token]
                 else:
                     token_vector = list(embeddings[token])
                     embeddings[token] = token_vector
-                #print(token_vector)
-                #fast_text_tensor = torch.FloatTensor(token_vector)
-                #print (fast_text_tensor)
                 question_embedding.append(token_vector) 
-            else: # this does not work
-                #print(token)
-                if type(embeddings['primordial']) == list:
-                    token_vector = embeddings['primordial']
-                else:
-                    token_vector = list(embeddings['primordial'])
-                    embeddings['primordial'] = token_vector
-                #print(token_vector)
-                #fast_text_tensor = torch.FloatTensor(token_vector)
-                #print (fast_text_tensor)
+            else: # just give them random weights
+                token_vector = np.random.normal(scale=0.6, size=(embedding_dim, ))
+                token_vector = token_vector.tolist()
                 question_embedding.append(token_vector) 
 
         #print(question_embedding)
         print ("About to add question #", count, " to the embeddings")
         count += 1
-        #question_tensor = torch.stack(question_embedding)
-        #questions_vector.append(question_tensor)
         question_embedding = torch.FloatTensor(question_embedding)
         questions_vector.append(question_embedding)
     
@@ -247,8 +239,10 @@ def get_data_info(training_data, embeddings):
     return full_data
 
 # Loads the embeddings if they already exist or saves them now
-def load_embeddings():
+def load_fast_text_embeddings():
     # Checking if we have already loaded the vectors before
+    Path(Path(os.getcwd()).parent).parent
+    os.chdir('data/')
     dirpath = os.getcwd()
     print("current directory is : " + dirpath)
     exists = os.path.isfile('embeddings.pickle')
@@ -261,7 +255,7 @@ def load_embeddings():
     else:
         # Getting the embeddings from FastText
         print("Attempting to create the embeddings")
-        #embeddings = KeyedVectors.load_word2vec_format('wiki-news-300d-1m.vec', limit=200000)
+        #embeddings = KeyedVectors.load_word2vec_format('wiki-news-300d-1m.vec', limit=300000)
         embeddings = load_vectors_wo_w2v('wiki-news-300d-1M.vec')
         with open('embeddings.pickle', 'wb') as f:
             pickle.dump({
@@ -270,26 +264,79 @@ def load_embeddings():
         print ("Embeddings have been created and saved in embeddings.pickle")
     return embeddings
 
+
 # Loads fasttext embeddings
 def load_vectors_wo_w2v(fname):
     Path(Path(os.getcwd()).parent).parent
-    os.chdir('data/')
     dirpath = os.getcwd()
-    print("current directory is : " + dirpath)
     print(os.listdir(os.curdir))
     fin = io.open(fname, 'r', encoding='utf-8', newline='\n', errors='ignore')
     n, d = map(int, fin.readline().split())
     data = {}
+    index_to_word = {}
     index = 0
     for line in fin:
         tokens = line.rstrip().split(' ')
         data[tokens[0]] = map(float, tokens[1:])
+        index_to_word[index] = tokens[0]
         index += 1
         if index % 10000 == 0:
             print ("Up to ", index, " words")
-        if index >= 200000:
+        if index >= 50000:
             break
-    return data
+    return data, index_to_word
+
+# Gets the vocabulary for all the words we will be learning
+def get_vocabulary(train_data, dev_data):
+    train_questions = train_data[0]
+    train_answers = train_data[1]
+
+    dev_questions = dev_data[0]
+    dev_answers = dev_data[1]
+
+    vocab = {}
+    index = 0
+
+    table = str.maketrans('', '', string.punctuation)
+
+    for question in train_questions:
+        full_question = ''.join(str(sentence) for sentence in question)
+        tokens = full_question.replace('.', ' ')
+        tokens = tokens.rstrip().split(' ')
+        for token in tokens:
+            if token not in vocab:
+                vocab[token] = index
+                index += 1
+
+    for question in dev_questions:
+        full_question = ''.join(str(sentence) for sentence in question)
+        tokens = full_question.replace('.', ' ')
+        tokens = tokens.rstrip().split(' ')
+        for token in tokens:
+            if token not in vocab:
+                vocab[token] = index
+                index += 1
+
+    for answer in train_answers:
+        full_answer = ''.join(str(sentence) for sentence in answer)
+        tokens = full_answer.replace('.', ' ')
+        tokens = tokens.rstrip().split(' ')
+        for token in tokens:
+            if token not in vocab:
+                vocab[token] = index
+                index += 1
+
+    for answer in dev_answers:
+        full_answer = ''.join(str(sentence) for sentence in answer)
+        tokens = full_answer.replace('.', ' ')
+        tokens = tokens.rstrip().split(' ')
+        for token in tokens:
+            if token not in vocab:
+                vocab[token] = index
+                index += 1
+
+    return vocab
+
 
 # Getting the dev data for our pytorch model
 def get_dev_data(dataset):
@@ -425,9 +472,21 @@ def train():
     # Create the model
     model = LSTMGuesser()
 
-    # Getting fast text embeddings
-    model.embeddings = load_embeddings()
+    # getting the vocabulary
+    vocab_exists = os.path.isfile('vocab.pickle')
+    if vocab_exists:
+        with open('vocab.pickle', 'wb') as f:
+            params = pickle.load(f)
+            vocab = params['vocab']
+    else:
+        vocab = get_vocabulary(training_data, dev_data)
+        with open('vocab.pickle', 'wb') as f:
+            pickle.dump({
+                'vocab' : vocab
+            }, f)
 
+    # Getting fast text embeddings
+    embeddings, i_to_w = load_fast_text_embeddings()
 
     # Creating/loading the train and dev vectors
     train_exists = os.path.isfile('training_vectors.pickle')
