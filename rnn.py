@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader
 import click
 import numpy as np
 import nltk
+nltk.download('punkt')
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from flask import Flask, jsonify, request
@@ -51,12 +52,57 @@ def batch_guess_and_buzz(model, questions) -> List[Tuple[str, bool]]:
     return outputs
 
 
-#You need to write code inside functions of this class
-class LSTMGuesser(nn.Module):
-    """.
-    We use a LSTM for our guesser.
+# Class for converting the tokenized data into vectors
+class QuestionDataset():
+    """
+    Pytorch data class for questions
     """
 
+    ###You don't need to change this funtion
+    def __init__(self, examples, word2ind, num_classes, embedding, class2ind=None):
+        self.questions = []
+        self.labels = []
+
+        for qq, ll in examples:
+            self.questions.append(qq)
+            self.labels.append(ll)
+        
+        if type(self.labels[0])==str:
+            for i in range(len(self.labels)):
+                try:
+                    self.labels[i] = class2ind[self.labels[i]]
+                except:
+                    self.labels[i] = num_classes
+        self.word2ind = word2ind
+        self.embeddings = embedding
+    
+    ###You don't need to change this funtion
+    def __getitem__(self, index):
+        return self.vectorize(self.questions[index], self.embeddings, self.word2ind), \
+          self.labels[index]
+    
+    ###You don't need to change this funtion
+    def __len__(self):
+        return len(self.questions)
+
+    @staticmethod
+    def vectorize(ex, embeddings, word2ind):
+
+        embedding_dim = list(embeddings.size())[1]
+        vec_text = [0] * len(ex)
+        for i in range(0, len(ex)):
+            if ex[i] in word2ind:
+                # Is this right? I'm not even sure
+                vec_text[i] = embeddings[word2ind[ex[i]]]
+            else:
+                token_vector = np.random.normal(scale=0.6, size=(embedding_dim, ))
+                vec_text[i] = torch.from_numpy(token_vector)
+
+        return vec_text
+
+
+# Guesser for our model that's implemented as an LSTM
+class LSTMGuesser(nn.Module):
     # n_input represents dimensionality of each word embedding as a vector 
     # n_output is number of answers (unique)
     def __init__(self, i_to_w, w_to_i, vocab, n_input = 100, n_hidden = 50, n_output = 300, dropout = 0.3, embedding_dim = 300):
@@ -80,8 +126,13 @@ class LSTMGuesser(nn.Module):
     def forward(self, question_text, question_len):
         print("In the forward method")
 
+        # Feed questions into the embedding
+        text_emb = self.embeddings(question_text)
+
+        # Probably have to squeeze these so they have the dimensions of the input for lstm
+
         #Get the output of LSTM - (output dim: batch_size x batch_max_len x lstm_hidden_dim)
-        output, _ = self.lstm(question_text)
+        output, _ = self.lstm(text_emb)
 
         # Pass through a dropout layer
         out = self.dropout(output)
@@ -118,15 +169,33 @@ class LSTMGuesser(nn.Module):
             return guesser
 
 # Get label that corresponds to the maximum logit
+# This is definitely not correct
 def guess(model, questions_text, max_guesses):
-    print("I will figure out what to do here later")
-    # turn question text into feature vector - turn it into an array of tensors with the embeddings
+
+    # turn question text into feature vector - turn
+    question_len = 0
+    table = str.maketrans('', '', string.punctuation)
+    for question in questions_text:
+        # do we want to separate by sentences somehow? I just got rid of the period
+        full_question = ''.join(str(sentence) for sentence in question)
+        #print (full_question)
+        tokens = full_question.replace('.', ' ')
+        tokens = tokens.rstrip().split(' ')
+        for token in tokens:
+            # cleaning data
+            token = token.translate(table)
+            token = token.lower()
+
+            question_len += 1
 
     # put feature vector into the model - model(feature_vector, length)
+    logits = model(questions_text, question_len)
 
     # the logits returned would be an array of all the labels, and we want the maximum value
+    top_n, top_i = logits.topk(1) # This might want to change to a larger number
 
     # figure out what the best label correpsonds to
+    return model.i_to_w[top_i]
 
 
 
@@ -175,6 +244,382 @@ def train_model(model, checkpoint, grad_clippings, save_name, train_data_loader,
     return accuracy
 
 
+
+"""
+Gather a batch of individual examples into one batch, 
+which includes the question text, question length and labels 
+Keyword arguments:
+batch: list of outputs from vectorize function
+"""
+def batchify(batch):
+    question_len = list()
+    label_list = list()
+    for ex in batch:
+        if ex is not None:
+            question_len.append(len(ex[0]))
+            label_list.append(ex[1])
+
+    target_labels = torch.LongTensor(label_list)
+    x1 = torch.LongTensor(len(question_len), max(question_len)).zero_()
+    for i in range(len(question_len)):
+        question_text = batch[i][0]
+        vec = torch.LongTensor(question_text)
+        x1[i, :len(question_text)].copy_(vec)
+    q_batch = {'text': x1, 'len': torch.FloatTensor(question_len), 'labels': target_labels}
+    return q_batch
+
+
+# Loads the embeddings if they already exist or saves them now
+def load_fast_text_embeddings():
+    # Checking if we have already loaded the vectors before
+    exists = os.path.isfile('embeddings.pickle')
+    if exists:
+        print("Attempting to load embeddings")
+        with open('embeddings.pickle', 'rb') as f:
+            params = pickle.load(f)
+            embeddings = params['fast_text_embeddings']
+        print("Embeddings were loaded from embeddings.pickle")
+    else:
+        # Getting the embeddings from FastText
+        print("Attempting to create the embeddings")
+        #embeddings = KeyedVectors.load_word2vec_format('wiki-news-300d-1m.vec', limit=300000)
+        embeddings = load_vectors_wo_w2v('wiki-news-300d-1m.vec')
+        with open('embeddings.pickle', 'wb') as f:
+            pickle.dump({
+                'fast_text_embeddings' : embeddings
+            }, f)
+        print ("Embeddings have been created and saved in embeddings.pickle")
+    return embeddings
+
+
+# Loads fasttext embeddings
+# Later, consider using glove if the embeddings are a smaller dimension
+def load_vectors_wo_w2v(fname):
+    os.chdir('data/')
+    dirpath = os.getcwd()
+    print("current directory is : " + dirpath)
+
+    fin = io.open(fname, 'r', encoding='utf-8', newline='\n', errors='ignore')
+    n, d = map(int, fin.readline().split())
+    data = []
+    words = []
+    index_to_word = {}
+    word_to_index = {}
+    index = 0
+
+    for line in fin:
+        tokens = line.rstrip().split(' ')
+        word = tokens[0]
+        words.append(word)
+        index_to_word[index] = word
+        word_to_index[word] = index
+        vect = list(map(float, tokens[1:]))
+        data.append(vect)
+
+        index += 1
+        if index % 10000 == 0:
+            print ("Up to ", index, " words")
+        if index >= 50000:
+            break
+
+    tensor = torch.FloatTensor(data)
+    return tensor, word_to_index, index_to_word, words
+
+
+# Getting the dev data for our pytorch model
+def get_dev_data(dataset):
+    dev_examples = []
+    dev_pages = []
+    questions = []
+    if dataset.guesser_train:
+        questions.extend(dataset.db.guess_dev_questions)
+
+    for q in questions:
+        dev_examples.append(q.sentences)
+        dev_pages.append(q.page)
+
+    return dev_examples, dev_pages, None
+
+
+# Gets the vocabulary for all the words we will be learning
+def get_vocabulary(train_data, dev_data):
+    train_questions = train_data[0]
+    train_answers = train_data[1]
+
+    dev_questions = dev_data[0]
+    dev_answers = dev_data[1]
+
+    vocab = {}
+    index = 0
+
+    table = str.maketrans('', '', string.punctuation)
+
+    for question in train_questions:
+        full_question = ''.join(str(sentence) for sentence in question)
+        tokens = full_question.replace('.', ' ')
+        tokens = tokens.rstrip().split(' ')
+        for token in tokens:
+            if token not in vocab:
+                vocab[token] = index
+                index += 1
+
+    for question in dev_questions:
+        full_question = ''.join(str(sentence) for sentence in question)
+        tokens = full_question.replace('.', ' ')
+        tokens = tokens.rstrip().split(' ')
+        for token in tokens:
+            if token not in vocab:
+                vocab[token] = index
+                index += 1
+
+    for answer in train_answers:
+        full_answer = ''.join(str(sentence) for sentence in answer)
+        tokens = full_answer.replace('.', ' ')
+        tokens = tokens.rstrip().split(' ')
+        for token in tokens:
+            if token not in vocab:
+                vocab[token] = index
+                index += 1
+
+    for answer in dev_answers:
+        full_answer = ''.join(str(sentence) for sentence in answer)
+        tokens = full_answer.replace('.', ' ')
+        tokens = tokens.rstrip().split(' ')
+        for token in tokens:
+            if token not in vocab:
+                vocab[token] = index
+                index += 1
+
+    return vocab
+
+"""
+evaluate the current model, get the accuracy for dev/test set
+Keyword arguments:
+data_loader: pytorch build-in data loader output
+model: model to be evaluated
+device: cpu of gpu
+"""
+# This needs to change, but Pranav said it shouldn't be too different
+def evaluate(data_loader, model, device):
+    model.eval()
+    num_examples = 0
+    error = 0
+    for idx, batch in enumerate(data_loader):
+        question_text = batch['text'].to(device)
+        question_len = batch['len']
+        labels = batch['labels']
+
+        logits = model(question_text, question_len)
+        top_n, top_i = logits.topk(1)
+        num_examples += question_text.size(0)
+        error += torch.nonzero(top_i.squeeze() - torch.LongTensor(labels)).size(0)
+    accuracy = 1 - error / num_examples
+    print('accuracy', accuracy)
+    return accuracy
+
+
+def load_data(filename, lim):
+    """
+    load the json file into data list
+    """
+    files = os.listdir(os.curdir)
+    print(files)
+    dataset_path=os.path.join('data', filename)
+
+    data = list()
+    with open(dataset_path) as json_data:
+        if lim>0:
+            questions = json.load(json_data)["questions"][:lim]
+        else:
+            questions = json.load(json_data)["questions"]
+        for q in questions:
+            q_text = nltk.word_tokenize(q['text'])
+            #label = q['category']
+            #print(q_text)
+            label = q['page']
+            if label:
+                data.append((q_text, label))
+    return data
+
+
+### Begin app stuff ###
+
+
+def create_app(enable_batch=True):
+    rnn_guesser = LSTMGuesser.load()
+    app = Flask(__name__)
+
+    @app.route('/api/1.0/quizbowl/act', methods=['POST'])
+    def act():
+        question = request.json['text']
+        guess, buzz = guess_and_buzz(rnn_guesser, question)
+        return jsonify({'guess': guess, 'buzz': True if buzz else False})
+
+    @app.route('/api/1.0/quizbowl/status', methods=['GET'])
+    def status():
+        return jsonify({
+            'batch': enable_batch,
+            'batch_size': 200,
+            'ready': True,
+            'include_wiki_paragraphs': False
+        })
+
+    @app.route('/api/1.0/quizbowl/batch_act', methods=['POST'])
+    def batch_act():
+        questions = [q['text'] for q in request.json['questions']]
+        return jsonify([
+            {'guess': guess, 'buzz': True if buzz else False}
+            for guess, buzz in batch_guess_and_buzz(rnn_guesser, questions)
+        ])
+
+
+    return app
+
+
+@click.group()
+def cli():
+    pass
+
+
+@cli.command()
+@click.option('--host', default='0.0.0.0')
+@click.option('--port', default=4861)
+@click.option('--disable-batch', default=False, is_flag=True)
+def web(host, port, disable_batch):
+    """
+    Start web server wrapping tfidf model
+    """
+    app = create_app(enable_batch=not disable_batch)
+    app.run(host=host, port=port, debug=False)
+
+
+@cli.command()
+def train():
+
+    # Ininitalize the dataset
+    dataset = QuizBowlDataset(guesser_train=True)
+    training_data = dataset.training_data()
+    dev_data = get_dev_data(dataset)
+
+    # Change these later, but these are random variable initializers
+    checkpoint = 50
+    grad_clippings = 5
+    batch_size = 128
+    epochs = 5
+    save_name = 'rnn.pt'
+
+
+    training_vectors = load_data('qanta.train.2018.04.18.json', 1)
+    dev_vectors = load_data('qanta.dev.2018.04.18.json', -1)
+
+    # Getting fast text embeddings
+    embeddings, i_to_w, w_to_i, words = load_fast_text_embeddings()
+
+    # getting the vocabulary
+    vocab_exists = os.path.isfile('vocab.pickle')
+    if vocab_exists:
+        print ("Loading vocab")
+        with open('vocab.pickle', 'rb') as f:
+            print('Vocab is loaded')
+            params = pickle.load(f)
+            vocab = params['vocab']
+    else:
+        vocab = get_vocabulary(training_data, dev_data)
+        with open('vocab.pickle', 'wb') as f:
+            pickle.dump({
+                'vocab' : vocab
+            }, f)
+
+    # Create the model
+    model = LSTMGuesser(i_to_w, w_to_i, vocab, n_input = 100, n_output = len(vocab))
+    model.embeddings = nn.Embedding.from_pretrained(embeddings)
+
+    # Determining if we are using cpu or gpu
+    device = torch.device('cpu')
+
+    # Converting our training and dev data into dataloaders which work well with training our RNN
+    #train_sampler = torch.utils.data.sampler.RandomSampler(training_vectors, device)
+    train_dataset = QuestionDataset(training_vectors, w_to_i, len(vocab), embeddings)
+    train_sampler = torch.utils.data.sampler.RandomSampler(training_vectors)
+    dev_sampler = torch.utils.data.sampler.RandomSampler(dev_vectors)
+    dev_loader = DataLoader(dev_vectors, batch_size=batch_size, sampler=dev_sampler, num_workers=0,
+                                           collate_fn=batchify)
+
+    # Here we are actually running the guesser and training it
+    accuracy = 0
+    print("Attmepting to train now")
+    for epoch in range (epochs):
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, num_workers=0,
+                                            collate_fn=batchify)
+        accuracy = train_model(model, checkpoint, grad_clippings, save_name, train_loader, dev_loader, accuracy, device)
+
+    # Save the model now
+    model.save()
+
+
+
+@cli.command()
+@click.option('--local-qanta-prefix', default='data/')
+@click.option('--retrieve-paragraphs', default=False, is_flag=True)
+def download(local_qanta_prefix, retrieve_paragraphs):
+    """
+    Run once to download qanta data to data/. Runs inside the docker container, but results save to host machine
+    """
+    util.download(local_qanta_prefix, retrieve_paragraphs)
+
+
+if __name__ == '__main__':
+    cli()
+
+
+#longest_q = longest_training_q if longest_training_q > longest_dev_q else longest_dev_q
+#model = LSTMGuesser(n_input = longest_q, n_output = len(vocab))
+
+'''
+# Creating/loading the train and dev vectors
+train_exists = os.path.isfile('training_vectors.pickle')
+if train_exists:
+    print("Loading training vectors")
+    with open('training_vectors.pickle', 'rb') as f:
+        params = pickle.load(f)
+        training_vectors = params['training_vectors']
+        longest_training_q = params['longest_q]
+else:
+    print ("Attempting to create training vectors")
+    training_vectors, longest_training_q = get_data_info(training_data, model.embeddings)
+    with open('training_vectors.pickle', 'wb') as f:
+        pickle.dump({
+            'training_vectors' : training_vectors
+            'longest_q' : longest_training_q
+        }, f)
+
+dev_exists = os.path.isfile('dev_vectors.pickle')
+if dev_exists:
+    print("Loading dev vectors")
+    with open('dev_vectors.pickle', 'rb') as f:
+        params = pickle.load(f)
+        dev_vectors = params['dev_vectors']
+        longest_dev_q = params['longest_q]
+else:
+    print ("Attempting to create dev vectors")
+    dev_vectors, longest_dev_q = get_data_info(dev_data, model.embeddings)
+    with open('dev_vectors.pickle', 'wb') as f:
+        pickle.dump({
+            'dev_vectors' : dev_vectors
+            'longest_q' : longest_dev_q
+        }, f)
+
+print("Training verctor shape is: ", training_vectors[0].shape)
+print("Dev verctor shape is: ", dev_vectors[0].shape)
+'''
+
+
+'''
+'''
+
+
+
+'''
 # This turns our actual questions and answers into embeddings
 def get_data_info(training_data, embeddings):
     questions = training_data[0]
@@ -249,369 +694,4 @@ def get_data_info(training_data, embeddings):
     full_data.append(answer_vector)
     
     return full_data, longest_question_len
-
-"""
-Gather a batch of individual examples into one batch, 
-which includes the question text, question length and labels 
-Keyword arguments:
-batch: list of outputs from vectorize function
-"""
-def batchify(batch):
-    question_len = list()
-    label_list = list()
-    for ex in batch:
-        #print (ex)
-        question_len.append(len(ex[0]))
-        label_list.append(ex[1])
-
-    target_labels = torch.LongTensor(label_list)
-    x1 = torch.LongTensor(len(question_len), max(question_len)).zero_()
-    for i in range(len(question_len)):
-        question_text = batch[i][0]
-        vec = torch.LongTensor(question_text)
-        x1[i, :len(question_text)].copy_(vec)
-    q_batch = {'text': x1, 'len': torch.FloatTensor(question_len), 'labels': target_labels}
-    return q_batch
-
-# Loads the embeddings if they already exist or saves them now
-def load_fast_text_embeddings():
-    # Checking if we have already loaded the vectors before
-    Path(Path(os.getcwd()).parent).parent
-    os.chdir('data/')
-    dirpath = os.getcwd()
-    print("current directory is : " + dirpath)
-    exists = os.path.isfile('embeddings.pickle')
-    if exists:
-        print("Attempting to load embeddings")
-        with open('embeddings.pickle', 'rb') as f:
-            params = pickle.load(f)
-            embeddings = params['fast_text_embeddings']
-        print("Embeddings were loaded from embeddings.pickle")
-    else:
-        # Getting the embeddings from FastText
-        print("Attempting to create the embeddings")
-        #embeddings = KeyedVectors.load_word2vec_format('wiki-news-300d-1m.vec', limit=300000)
-        embeddings = load_vectors_wo_w2v('wiki-news-300d-1m.vec')
-        with open('embeddings.pickle', 'wb') as f:
-            pickle.dump({
-                'fast_text_embeddings' : embeddings
-            }, f)
-        print ("Embeddings have been created and saved in embeddings.pickle")
-    return embeddings
-
-
-# Loads fasttext embeddings
-# Later, consider using glove if the embeddings are a smaller dimension
-def load_vectors_wo_w2v(fname):
-    #Path(Path(os.getcwd()).parent).parent
-    #os.chdir('data/')
-    dirpath = os.getcwd()
-
-    fin = io.open(fname, 'r', encoding='utf-8', newline='\n', errors='ignore')
-    n, d = map(int, fin.readline().split())
-    data = []
-    words = []
-    index_to_word = {}
-    word_to_index = {}
-    index = 0
-
-    for line in fin:
-        tokens = line.rstrip().split(' ')
-        word = tokens[0]
-        words.append(word)
-        index_to_word[index] = word
-        word_to_index[word] = index
-        vect = list(map(float, tokens[1:]))
-        data.append(vect)
-
-        index += 1
-        if index % 10000 == 0:
-            print ("Up to ", index, " words")
-        if index >= 50000:
-            break
-
-    tensor = torch.FloatTensor(data)
-    return tensor, word_to_index, index_to_word, words
-
-
-# Getting the dev data for our pytorch model
-def get_dev_data(dataset):
-    dev_examples = []
-    dev_pages = []
-    questions = []
-    if dataset.guesser_train:
-        questions.extend(dataset.db.guess_dev_questions)
-
-    for q in questions:
-        dev_examples.append(q.sentences)
-        dev_pages.append(q.page)
-
-    return dev_examples, dev_pages, None
-
-
-"""
-evaluate the current model, get the accuracy for dev/test set
-Keyword arguments:
-data_loader: pytorch build-in data loader output
-model: model to be evaluated
-device: cpu of gpu
-"""
-# This needs to change, but Pranav said it shouldn't be too different
-def evaluate(data_loader, model, device):
-    model.eval()
-    num_examples = 0
-    error = 0
-    for idx, batch in enumerate(data_loader):
-        question_text = batch['text'].to(device)
-        question_len = batch['len']
-        labels = batch['labels']
-
-        logits = model(question_text, question_len)
-        top_n, top_i = logits.topk(1)
-        num_examples += question_text.size(0)
-        error += torch.nonzero(top_i.squeeze() - torch.LongTensor(labels)).size(0)
-    accuracy = 1 - error / num_examples
-    print('accuracy', accuracy)
-    return accuracy
-
-
-def load_data(filename, lim):
-    """
-    load the json file into data list
-    """
-    data = list()
-    with open(filename) as json_data:
-        if lim>0:
-            questions = json.load(json_data)["questions"][:lim]
-        else:
-            questions = json.load(json_data)["questions"]
-        for q in questions:
-            q_text = nltk.word_tokenize(q['text'])
-            label = q['category']
-            #label = q['page']
-            if label:
-                data.append((q_text, label))
-    return data
-
-
-### Begin app stuff ###
-
-
-def create_app(enable_batch=True):
-    rnn_guesser = LSTMGuesser.load()
-    app = Flask(__name__)
-
-    @app.route('/api/1.0/quizbowl/act', methods=['POST'])
-    def act():
-        question = request.json['text']
-        guess, buzz = guess_and_buzz(rnn_guesser, question)
-        return jsonify({'guess': guess, 'buzz': True if buzz else False})
-
-    @app.route('/api/1.0/quizbowl/status', methods=['GET'])
-    def status():
-        return jsonify({
-            'batch': enable_batch,
-            'batch_size': 200,
-            'ready': True,
-            'include_wiki_paragraphs': False
-        })
-
-    @app.route('/api/1.0/quizbowl/batch_act', methods=['POST'])
-    def batch_act():
-        questions = [q['text'] for q in request.json['questions']]
-        return jsonify([
-            {'guess': guess, 'buzz': True if buzz else False}
-            for guess, buzz in batch_guess_and_buzz(rnn_guesser, questions)
-        ])
-
-
-    return app
-
-
-@click.group()
-def cli():
-    pass
-
-
-@cli.command()
-@click.option('--host', default='0.0.0.0')
-@click.option('--port', default=4861)
-@click.option('--disable-batch', default=False, is_flag=True)
-def web(host, port, disable_batch):
-    """
-    Start web server wrapping tfidf model
-    """
-    app = create_app(enable_batch=not disable_batch)
-    app.run(host=host, port=port, debug=False)
-
-
-@cli.command()
-def train():
-
-    # Ininitalize the dataset
-    dataset = QuizBowlDataset(guesser_train=True)
-    training_data = dataset.training_data()
-    dev_data = get_dev_data(dataset)
-
-    # Change these later, but these are random variable initializers
-    checkpoint = 50
-    grad_clippings = 5
-    batch_size = 128
-    save_name = 'rnn.pt'
-
-    '''
-    # getting the vocabulary
-    vocab_exists = os.path.isfile('vocab.pickle')
-    if vocab_exists:
-        print ("Loading vocab")
-        with open('vocab.pickle', 'rb') as f:
-            print('Vocab is loaded')
-            params = pickle.load(f)
-            vocab = params['vocab']
-    else:
-        vocab = get_vocabulary(training_data, dev_data)
-        with open('vocab.pickle', 'wb') as f:
-            pickle.dump({
-                'vocab' : vocab
-            }, f)
-    '''
-
-    # Getting fast text embeddings
-    embeddings, i_to_w, w_to_i, vocab = load_fast_text_embeddings()
-
-
-    #longest_q = longest_training_q if longest_training_q > longest_dev_q else longest_dev_q
-    #model = LSTMGuesser(n_input = longest_q, n_output = len(vocab))
-
-    # Create the model
-    model = LSTMGuesser(i_to_w, w_to_i, vocab, n_input = 100, n_output = len(vocab))
-    model.embeddings = nn.Embedding.from_pretrained(embeddings)
-
-    # Determining if we are using cpu or gpu
-    device = torch.device('cpu')
-
-    # Converting our training and dev data into dataloaders which work well with training our RNN
-    #train_sampler = torch.utils.data.sampler.RandomSampler(training_vectors, device)
-    train_sampler = torch.utils.data.sampler.RandomSampler(training_data)
-    train_loader = DataLoader(training_data, batch_size=batch_size, sampler=train_sampler, num_workers=0,
-                                           collate_fn=batchify)
-    dev_sampler = torch.utils.data.sampler.RandomSampler(dev_data)
-    dev_loader = DataLoader(dev_data, batch_size=batch_size, sampler=dev_sampler, num_workers=0,
-                                           collate_fn=batchify)
-
-    # Here we are actually running the guesser and training it
-    accuracy = 0
-    print("Attmepting to train now")
-    train_model(model, checkpoint, grad_clippings, save_name, train_loader, dev_loader, accuracy, device)
-
-    # Save the model now
-    model.save()
-
-
-
-@cli.command()
-@click.option('--local-qanta-prefix', default='data/')
-@click.option('--retrieve-paragraphs', default=False, is_flag=True)
-def download(local_qanta_prefix, retrieve_paragraphs):
-    """
-    Run once to download qanta data to data/. Runs inside the docker container, but results save to host machine
-    """
-    util.download(local_qanta_prefix, retrieve_paragraphs)
-
-
-if __name__ == '__main__':
-    cli()
-
-#training_vectors = load_data(training_data, 1)
-#dev_vectors = load_data(dev_data, -1)
-'''
-# Creating/loading the train and dev vectors
-train_exists = os.path.isfile('training_vectors.pickle')
-if train_exists:
-    print("Loading training vectors")
-    with open('training_vectors.pickle', 'rb') as f:
-        params = pickle.load(f)
-        training_vectors = params['training_vectors']
-        longest_training_q = params['longest_q]
-else:
-    print ("Attempting to create training vectors")
-    training_vectors, longest_training_q = get_data_info(training_data, model.embeddings)
-    with open('training_vectors.pickle', 'wb') as f:
-        pickle.dump({
-            'training_vectors' : training_vectors
-            'longest_q' : longest_training_q
-        }, f)
-
-dev_exists = os.path.isfile('dev_vectors.pickle')
-if dev_exists:
-    print("Loading dev vectors")
-    with open('dev_vectors.pickle', 'rb') as f:
-        params = pickle.load(f)
-        dev_vectors = params['dev_vectors']
-        longest_dev_q = params['longest_q]
-else:
-    print ("Attempting to create dev vectors")
-    dev_vectors, longest_dev_q = get_data_info(dev_data, model.embeddings)
-    with open('dev_vectors.pickle', 'wb') as f:
-        pickle.dump({
-            'dev_vectors' : dev_vectors
-            'longest_q' : longest_dev_q
-        }, f)
-
-print("Training verctor shape is: ", training_vectors[0].shape)
-print("Dev verctor shape is: ", dev_vectors[0].shape)
-'''
-
-
-'''
-# Gets the vocabulary for all the words we will be learning
-def get_vocabulary(train_data, dev_data):
-    train_questions = train_data[0]
-    train_answers = train_data[1]
-
-    dev_questions = dev_data[0]
-    dev_answers = dev_data[1]
-
-    vocab = {}
-    index = 0
-
-    table = str.maketrans('', '', string.punctuation)
-
-    for question in train_questions:
-        full_question = ''.join(str(sentence) for sentence in question)
-        tokens = full_question.replace('.', ' ')
-        tokens = tokens.rstrip().split(' ')
-        for token in tokens:
-            if token not in vocab:
-                vocab[token] = index
-                index += 1
-
-    for question in dev_questions:
-        full_question = ''.join(str(sentence) for sentence in question)
-        tokens = full_question.replace('.', ' ')
-        tokens = tokens.rstrip().split(' ')
-        for token in tokens:
-            if token not in vocab:
-                vocab[token] = index
-                index += 1
-
-    for answer in train_answers:
-        full_answer = ''.join(str(sentence) for sentence in answer)
-        tokens = full_answer.replace('.', ' ')
-        tokens = tokens.rstrip().split(' ')
-        for token in tokens:
-            if token not in vocab:
-                vocab[token] = index
-                index += 1
-
-    for answer in dev_answers:
-        full_answer = ''.join(str(sentence) for sentence in answer)
-        tokens = full_answer.replace('.', ' ')
-        tokens = tokens.rstrip().split(' ')
-        for token in tokens:
-            if token not in vocab:
-                vocab[token] = index
-                index += 1
-
-    return vocab
 '''
