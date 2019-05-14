@@ -88,7 +88,7 @@ class QuestionDataset():
     @staticmethod
     def vectorize(ex, embeddings, word2ind):
 
-        embedding_dim = list(embeddings.size())[1]
+        embedding_dim = len(embeddings[0])
         vec_text = [0] * len(ex)
         for i in range(0, len(ex)):
             if ex[i] in word2ind:
@@ -96,7 +96,7 @@ class QuestionDataset():
                 vec_text[i] = embeddings[word2ind[ex[i]]]
             else:
                 token_vector = np.random.normal(scale=0.6, size=(embedding_dim, ))
-                vec_text[i] = torch.from_numpy(token_vector)
+                vec_text[i] = token_vector.tolist()
 
         return vec_text
 
@@ -127,12 +127,12 @@ class LSTMGuesser(nn.Module):
         print("In the forward method")
 
         # Feed questions into the embedding
-        text_emb = self.embeddings(question_text)
+        #text_emb = self.embeddings(question_text)
 
         # Probably have to squeeze these so they have the dimensions of the input for lstm
 
         #Get the output of LSTM - (output dim: batch_size x batch_max_len x lstm_hidden_dim)
-        output, _ = self.lstm(text_emb)
+        output, _ = self.lstm(question_text)
 
         # Pass through a dropout layer
         out = self.dropout(output)
@@ -155,7 +155,10 @@ class LSTMGuesser(nn.Module):
                 'lstm' : self.lstm,
                 'dropout' : self.dropout,
                 'hidden' : self.hidden,
-                'embeddings' : self.embeddings
+                'i_to_w' : self.i_to_w,
+                'w_to_i' : self.w_to_i,
+                'vocab' : self.vocab
+                #'embeddings' : self.embeddings
             }, f)
     
     def load(self):
@@ -165,7 +168,10 @@ class LSTMGuesser(nn.Module):
             guesser.lstm = params['lstm']
             guesser.dropout = params['dropout']
             guesser.hidden = params['hidden']
-            guesser.embeddings = params['embeddings']
+            guesser.i_to_w = params['i_to_w']
+            guesser.w_to_i = params['w_to_i']
+            guesser.vocab = params['vocab']
+            #guesser.embeddings = params['embeddings']
             return guesser
 
 # Get label that corresponds to the maximum logit
@@ -261,7 +267,7 @@ def batchify(batch):
 
     target_labels = torch.LongTensor(label_list)
     x1 = torch.LongTensor(len(question_len), max(question_len)).zero_()
-    for i in range(len(question_len)):
+    for i in range(1, len(question_len)):
         question_text = batch[i][0]
         vec = torch.LongTensor(question_text)
         x1[i, :len(question_text)].copy_(vec)
@@ -322,8 +328,8 @@ def load_vectors_wo_w2v(fname):
         if index >= 50000:
             break
 
-    tensor = torch.FloatTensor(data)
-    return tensor, word_to_index, index_to_word, words
+    #tensor = torch.FloatTensor(data)
+    return data, word_to_index, index_to_word, words
 
 
 # Getting the dev data for our pytorch model
@@ -423,7 +429,6 @@ def load_data(filename, lim):
     load the json file into data list
     """
     files = os.listdir(os.curdir)
-    print(files)
     dataset_path=os.path.join('data', filename)
 
     data = list()
@@ -532,7 +537,7 @@ def train():
 
     # Create the model
     model = LSTMGuesser(i_to_w, w_to_i, vocab, n_input = 100, n_output = len(vocab))
-    model.embeddings = nn.Embedding.from_pretrained(embeddings)
+    #model.embeddings = nn.Embedding.from_pretrained(embeddings)
 
     # Determining if we are using cpu or gpu
     device = torch.device('cpu')
@@ -541,6 +546,9 @@ def train():
     #train_sampler = torch.utils.data.sampler.RandomSampler(training_vectors, device)
     train_dataset = QuestionDataset(training_vectors, w_to_i, len(vocab), embeddings)
     train_sampler = torch.utils.data.sampler.RandomSampler(training_vectors)
+
+
+    dev_dataset = QuestionDataset(dev_vectors, w_to_i, len(vocab), embeddings)
     dev_sampler = torch.utils.data.sampler.RandomSampler(dev_vectors)
     dev_loader = DataLoader(dev_vectors, batch_size=batch_size, sampler=dev_sampler, num_workers=0,
                                            collate_fn=batchify)
