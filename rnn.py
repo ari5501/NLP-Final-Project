@@ -291,7 +291,7 @@ def load_fast_text_embeddings():
         # Getting the embeddings from FastText
         print("Attempting to create the embeddings")
         #embeddings = KeyedVectors.load_word2vec_format('wiki-news-300d-1m.vec', limit=300000)
-        embeddings = load_vectors_wo_w2v('wiki-news-300d-1M.vec')
+        embeddings = load_vectors_wo_w2v('wiki-news-300d-1m.vec')
         with open('embeddings.pickle', 'wb') as f:
             pickle.dump({
                 'fast_text_embeddings' : embeddings
@@ -318,11 +318,10 @@ def load_vectors_wo_w2v(fname):
     for line in fin:
         tokens = line.rstrip().split(' ')
         word = tokens[0]
-        words.appen(word)
+        words.append(word)
         index_to_word[index] = word
         word_to_index[word] = index
-        vect = np.array(line[1:]).astype(np.float)
-        vect = vect.tolist()
+        vect = list(map(float, tokens[1:]))
         data.append(vect)
 
         index += 1
