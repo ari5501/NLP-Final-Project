@@ -59,7 +59,7 @@ class LSTMGuesser(nn.Module):
 
     # n_input represents dimensionality of each word embedding as a vector 
     # n_output is number of answers (unique)
-    def __init__(self, n_input = 100, n_hidden = 50, n_output = 300, dropout = 0.3):
+    def __init__(self, i_to_w, w_to_i, vocab, n_input = 100, n_hidden = 50, n_output = 300, dropout = 0.3, embedding_dim = 300):
         super(LSTMGuesser, self).__init__()
         
         self.n_input = n_input  # size of longest question
@@ -70,8 +70,10 @@ class LSTMGuesser(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.hidden = nn.Linear(self.n_hidden, self.n_output) # this layer might not be needed
 
-        self.embeddings = None
-        self.i_to_w = None
+        self.embeddings = nn.Embedding(n_input, embedding_dim)
+        self.i_to_w = i_to_w
+        self.w_to_i = w_to_i
+        self.vocab = vocab
 
 
     # Model forward pass, returns the logits of the predictions.
@@ -138,7 +140,7 @@ def train_model(model, checkpoint, grad_clippings, save_name, train_data_loader,
     accuracy: previous best accuracy
     device: cpu of gpu
     """
-    print ("starting training")
+    print ("Starting training")
     model.train()
     optimizer = torch.optim.Adamax(model.parameters())
     criterion = nn.CrossEntropyLoss()
@@ -258,7 +260,7 @@ def batchify(batch):
     question_len = list()
     label_list = list()
     for ex in batch:
-        print (ex)
+        #print (ex)
         question_len.append(len(ex[0]))
         label_list.append(ex[1])
 
@@ -301,13 +303,14 @@ def load_fast_text_embeddings():
 # Loads fasttext embeddings
 # Later, consider using glove if the embeddings are a smaller dimension
 def load_vectors_wo_w2v(fname):
-    Path(Path(os.getcwd()).parent).parent
-    os.chdir('data/')
+    #Path(Path(os.getcwd()).parent).parent
+    #os.chdir('data/')
     dirpath = os.getcwd()
 
     fin = io.open(fname, 'r', encoding='utf-8', newline='\n', errors='ignore')
     n, d = map(int, fin.readline().split())
-    data = {}
+    data = []
+    words = []
     index_to_word = {}
     word_to_index = {}
     index = 0
@@ -315,9 +318,12 @@ def load_vectors_wo_w2v(fname):
     for line in fin:
         tokens = line.rstrip().split(' ')
         word = tokens[0]
+        words.appen(word)
         index_to_word[index] = word
         word_to_index[word] = index
-        data[word] = map(float, tokens[1:]) 
+        vect = np.array(line[1:]).astype(np.float)
+        vect = vect.tolist()
+        data.append(vect)
 
         index += 1
         if index % 10000 == 0:
@@ -325,58 +331,8 @@ def load_vectors_wo_w2v(fname):
         if index >= 50000:
             break
 
-    return data, word_to_index, index_to_word
-
-# Gets the vocabulary for all the words we will be learning
-def get_vocabulary(train_data, dev_data):
-    train_questions = train_data[0]
-    train_answers = train_data[1]
-
-    dev_questions = dev_data[0]
-    dev_answers = dev_data[1]
-
-    vocab = {}
-    index = 0
-
-    table = str.maketrans('', '', string.punctuation)
-
-    for question in train_questions:
-        full_question = ''.join(str(sentence) for sentence in question)
-        tokens = full_question.replace('.', ' ')
-        tokens = tokens.rstrip().split(' ')
-        for token in tokens:
-            if token not in vocab:
-                vocab[token] = index
-                index += 1
-
-    for question in dev_questions:
-        full_question = ''.join(str(sentence) for sentence in question)
-        tokens = full_question.replace('.', ' ')
-        tokens = tokens.rstrip().split(' ')
-        for token in tokens:
-            if token not in vocab:
-                vocab[token] = index
-                index += 1
-
-    for answer in train_answers:
-        full_answer = ''.join(str(sentence) for sentence in answer)
-        tokens = full_answer.replace('.', ' ')
-        tokens = tokens.rstrip().split(' ')
-        for token in tokens:
-            if token not in vocab:
-                vocab[token] = index
-                index += 1
-
-    for answer in dev_answers:
-        full_answer = ''.join(str(sentence) for sentence in answer)
-        tokens = full_answer.replace('.', ' ')
-        tokens = tokens.rstrip().split(' ')
-        for token in tokens:
-            if token not in vocab:
-                vocab[token] = index
-                index += 1
-
-    return vocab
+    tensor = torch.FloatTensor(data)
+    return tensor, word_to_index, index_to_word, words
 
 
 # Getting the dev data for our pytorch model
@@ -504,6 +460,7 @@ def train():
     batch_size = 128
     save_name = 'rnn.pt'
 
+    '''
     # getting the vocabulary
     vocab_exists = os.path.isfile('vocab.pickle')
     if vocab_exists:
@@ -518,59 +475,18 @@ def train():
             pickle.dump({
                 'vocab' : vocab
             }, f)
-
+    '''
 
     # Getting fast text embeddings
-    embeddings, i_to_w  = load_fast_text_embeddings()
+    embeddings, i_to_w, w_to_i, vocab = load_fast_text_embeddings()
 
-
-    #training_vectors = load_data(training_data, 1)
-    #dev_vectors = load_data(dev_data, -1)
-    '''
-    # Creating/loading the train and dev vectors
-    train_exists = os.path.isfile('training_vectors.pickle')
-    if train_exists:
-        print("Loading training vectors")
-        with open('training_vectors.pickle', 'rb') as f:
-            params = pickle.load(f)
-            training_vectors = params['training_vectors']
-            longest_training_q = params['longest_q]
-    else:
-        print ("Attempting to create training vectors")
-        training_vectors, longest_training_q = get_data_info(training_data, model.embeddings)
-        with open('training_vectors.pickle', 'wb') as f:
-            pickle.dump({
-                'training_vectors' : training_vectors
-                'longest_q' : longest_training_q
-            }, f)
-
-    dev_exists = os.path.isfile('dev_vectors.pickle')
-    if dev_exists:
-        print("Loading dev vectors")
-        with open('dev_vectors.pickle', 'rb') as f:
-            params = pickle.load(f)
-            dev_vectors = params['dev_vectors']
-            longest_dev_q = params['longest_q]
-    else:
-        print ("Attempting to create dev vectors")
-        dev_vectors, longest_dev_q = get_data_info(dev_data, model.embeddings)
-        with open('dev_vectors.pickle', 'wb') as f:
-            pickle.dump({
-                'dev_vectors' : dev_vectors
-                'longest_q' : longest_dev_q
-            }, f)
-
-    print("Training verctor shape is: ", training_vectors[0].shape)
-    print("Dev verctor shape is: ", dev_vectors[0].shape)
-    '''
 
     #longest_q = longest_training_q if longest_training_q > longest_dev_q else longest_dev_q
     #model = LSTMGuesser(n_input = longest_q, n_output = len(vocab))
 
     # Create the model
-    model = LSTMGuesser(n_input = 100, n_output = len(vocab))
-    model.embeddings = embeddings
-    model.i_to_w = i_to_w
+    model = LSTMGuesser(i_to_w, w_to_i, vocab, n_input = 100, n_output = len(vocab))
+    model.embeddings = nn.Embedding.from_pretrained(embeddings)
 
     # Determining if we are using cpu or gpu
     device = torch.device('cpu')
@@ -586,6 +502,7 @@ def train():
 
     # Here we are actually running the guesser and training it
     accuracy = 0
+    print("Attmepting to train now")
     train_model(model, checkpoint, grad_clippings, save_name, train_loader, dev_loader, accuracy, device)
 
     # Save the model now
@@ -605,3 +522,97 @@ def download(local_qanta_prefix, retrieve_paragraphs):
 
 if __name__ == '__main__':
     cli()
+
+#training_vectors = load_data(training_data, 1)
+#dev_vectors = load_data(dev_data, -1)
+'''
+# Creating/loading the train and dev vectors
+train_exists = os.path.isfile('training_vectors.pickle')
+if train_exists:
+    print("Loading training vectors")
+    with open('training_vectors.pickle', 'rb') as f:
+        params = pickle.load(f)
+        training_vectors = params['training_vectors']
+        longest_training_q = params['longest_q]
+else:
+    print ("Attempting to create training vectors")
+    training_vectors, longest_training_q = get_data_info(training_data, model.embeddings)
+    with open('training_vectors.pickle', 'wb') as f:
+        pickle.dump({
+            'training_vectors' : training_vectors
+            'longest_q' : longest_training_q
+        }, f)
+
+dev_exists = os.path.isfile('dev_vectors.pickle')
+if dev_exists:
+    print("Loading dev vectors")
+    with open('dev_vectors.pickle', 'rb') as f:
+        params = pickle.load(f)
+        dev_vectors = params['dev_vectors']
+        longest_dev_q = params['longest_q]
+else:
+    print ("Attempting to create dev vectors")
+    dev_vectors, longest_dev_q = get_data_info(dev_data, model.embeddings)
+    with open('dev_vectors.pickle', 'wb') as f:
+        pickle.dump({
+            'dev_vectors' : dev_vectors
+            'longest_q' : longest_dev_q
+        }, f)
+
+print("Training verctor shape is: ", training_vectors[0].shape)
+print("Dev verctor shape is: ", dev_vectors[0].shape)
+'''
+
+
+'''
+# Gets the vocabulary for all the words we will be learning
+def get_vocabulary(train_data, dev_data):
+    train_questions = train_data[0]
+    train_answers = train_data[1]
+
+    dev_questions = dev_data[0]
+    dev_answers = dev_data[1]
+
+    vocab = {}
+    index = 0
+
+    table = str.maketrans('', '', string.punctuation)
+
+    for question in train_questions:
+        full_question = ''.join(str(sentence) for sentence in question)
+        tokens = full_question.replace('.', ' ')
+        tokens = tokens.rstrip().split(' ')
+        for token in tokens:
+            if token not in vocab:
+                vocab[token] = index
+                index += 1
+
+    for question in dev_questions:
+        full_question = ''.join(str(sentence) for sentence in question)
+        tokens = full_question.replace('.', ' ')
+        tokens = tokens.rstrip().split(' ')
+        for token in tokens:
+            if token not in vocab:
+                vocab[token] = index
+                index += 1
+
+    for answer in train_answers:
+        full_answer = ''.join(str(sentence) for sentence in answer)
+        tokens = full_answer.replace('.', ' ')
+        tokens = tokens.rstrip().split(' ')
+        for token in tokens:
+            if token not in vocab:
+                vocab[token] = index
+                index += 1
+
+    for answer in dev_answers:
+        full_answer = ''.join(str(sentence) for sentence in answer)
+        tokens = full_answer.replace('.', ' ')
+        tokens = tokens.rstrip().split(' ')
+        for token in tokens:
+            if token not in vocab:
+                vocab[token] = index
+                index += 1
+
+    return vocab
+'''
