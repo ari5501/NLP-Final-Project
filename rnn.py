@@ -91,12 +91,14 @@ class QuestionDataset():
         embedding_dim = len(embeddings[0])
         vec_text = [0] * len(ex)
         for i in range(0, len(ex)):
-            if ex[i] in word2ind:
-                # Is this right? I'm not even sure
-                vec_text[i] = embeddings[word2ind[ex[i]]]
+            cur_word = ex[i].lower()
+            if cur_word in word2ind:
+                vec_text[i] = embeddings[word2ind[cur_word]]
             else:
+                #print(cur_word, " isn't in the dictionary")
                 token_vector = np.random.normal(scale=0.6, size=(embedding_dim, ))
                 vec_text[i] = token_vector.tolist()
+                #print(vec_text[i])
 
         return vec_text
 
@@ -132,6 +134,8 @@ class LSTMGuesser(nn.Module):
         # Probably have to squeeze these so they have the dimensions of the input for lstm
 
         #Get the output of LSTM - (output dim: batch_size x batch_max_len x lstm_hidden_dim)
+        print(question_text.size())
+        print(question_text)
         output, _ = self.lstm(question_text)
 
         # Pass through a dropout layer
@@ -228,6 +232,8 @@ def train_model(model, checkpoint, grad_clippings, save_name, train_data_loader,
         question_len = batch['len']
         labels = batch['labels']
 
+        print(question_text)
+
         out = model(question_text, question_len)
         optimizer.zero_grad()
         loss = criterion(out, labels)
@@ -261,17 +267,17 @@ def batchify(batch):
     question_len = list()
     label_list = list()
     for ex in batch:
-        if ex is not None:
-            question_len.append(len(ex[0]))
-            label_list.append(ex[1])
+        question_len.append(len(ex[0]))
+        label_list.append(ex[1])
 
     target_labels = torch.LongTensor(label_list)
-    x1 = torch.LongTensor(len(question_len), max(question_len)).zero_()
-    for i in range(1, len(question_len)):
+    x1 = torch.FloatTensor(len(question_len), max(question_len)).zero_()
+    for i in range(len(question_len)):
         question_text = batch[i][0]
-        vec = torch.LongTensor(question_text)
-        x1[i, :len(question_text)].copy_(vec)
+        vec = torch.FloatTensor(question_text)
+        x1[i, :len(question_text)].copy_(vec.squeeze())
     q_batch = {'text': x1, 'len': torch.FloatTensor(question_len), 'labels': target_labels}
+    print ("In the batch")
     return q_batch
 
 
@@ -324,6 +330,7 @@ def load_vectors_wo_w2v(fname):
 
         index += 1
         if index % 10000 == 0:
+            print(word)
             print ("Up to ", index, " words")
         if index >= 50000:
             break
@@ -440,7 +447,6 @@ def load_data(filename, lim):
         for q in questions:
             q_text = nltk.word_tokenize(q['text'])
             #label = q['category']
-            #print(q_text)
             label = q['page']
             if label:
                 data.append((q_text, label))
@@ -514,11 +520,38 @@ def train():
     save_name = 'rnn.pt'
 
 
-    training_vectors = load_data('qanta.train.2018.04.18.json', 1)
-    dev_vectors = load_data('qanta.dev.2018.04.18.json', -1)
+    # Getting all of the data and tokenizing it
+    train_data_exists = os.path.isfile('train_dataset.pickle')
+    if train_data_exists:
+        print ("Loading training vectors")
+        with open('train_dataset.pickle', 'rb') as f:
+            params = pickle.load(f)
+            training_vectors = params['train_data']
+    else:
+        print ("Creating dev vectors")
+        training_vectors = load_data('qanta.train.2018.04.18.json', -1)
+        with open('train_dataset.pickle', 'wb') as f:
+            pickle.dump({
+                'train_data' : training_vectors
+            }, f)
+
+    dev_data_exists = os.path.isfile('dev_dataset.pickle')
+    if dev_data_exists:
+        print ("Loading dev vectors")
+        with open('dev_dataset.pickle', 'rb') as f:
+            params = pickle.load(f)
+            dev_vectors = params['dev_data']
+    else:
+        print ("Creating dev vectors")
+        dev_vectors = load_data('qanta.dev.2018.04.18.json', -1)
+        with open('dev_dataset.pickle', 'wb') as f:
+            pickle.dump({
+                'dev_data' : dev_vectors
+            }, f)
+    
 
     # Getting fast text embeddings
-    embeddings, i_to_w, w_to_i, words = load_fast_text_embeddings()
+    embeddings, w_to_i, i_to_w, words = load_fast_text_embeddings()
 
     # getting the vocabulary
     vocab_exists = os.path.isfile('vocab.pickle')
@@ -536,7 +569,7 @@ def train():
             }, f)
 
     # Create the model
-    model = LSTMGuesser(i_to_w, w_to_i, vocab, n_input = 100, n_output = len(vocab))
+    model = LSTMGuesser(i_to_w, w_to_i, vocab, n_input = 150, n_output = len(vocab))
     #model.embeddings = nn.Embedding.from_pretrained(embeddings)
 
     # Determining if we are using cpu or gpu
