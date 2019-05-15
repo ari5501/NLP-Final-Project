@@ -33,6 +33,7 @@ from .dataset import QuizBowlDataset
 MODEL_PATH = 'rnn.pickle'
 BUZZ_NUM_GUESSES = 10
 BUZZ_THRESHOLD = 0.3
+EMB_DIM = 300
 
 
 def guess_and_buzz(model, question_text) -> Tuple[str, bool]:
@@ -87,18 +88,15 @@ class QuestionDataset():
 
     @staticmethod
     def vectorize(ex, embeddings, word2ind):
-
-        embedding_dim = len(embeddings[0])
         vec_text = [0] * len(ex)
         for i in range(0, len(ex)):
             cur_word = ex[i].lower()
             if cur_word in word2ind:
                 vec_text[i] = embeddings[word2ind[cur_word]]
             else:
-                #print(cur_word, " isn't in the dictionary")
-                token_vector = np.random.normal(scale=0.6, size=(embedding_dim, ))
+                # could do a bunch of zeros instead
+                token_vector = np.random.normal(scale=0.6, size=(EMB_DIM, ))
                 vec_text[i] = token_vector.tolist()
-                #print(vec_text[i])
 
         return vec_text
 
@@ -107,7 +105,7 @@ class QuestionDataset():
 class LSTMGuesser(nn.Module):
     # n_input represents dimensionality of each word embedding as a vector 
     # n_output is number of answers (unique)
-    def __init__(self, i_to_w, w_to_i, vocab, n_input = 100, n_hidden = 50, n_output = 300, dropout = 0.3, embedding_dim = 300):
+    def __init__(self, i_to_w, w_to_i, vocab, n_input = 100, n_hidden = 50, n_output = 300, dropout = 0.3):
         super(LSTMGuesser, self).__init__()
         
         self.n_input = n_input  # size of longest question
@@ -118,7 +116,7 @@ class LSTMGuesser(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.hidden = nn.Linear(self.n_hidden, self.n_output) # this layer might not be needed
 
-        self.embeddings = nn.Embedding(n_input, embedding_dim)
+        self.embeddings = nn.Embedding(n_input, EMB_DIM)
         self.i_to_w = i_to_w
         self.w_to_i = w_to_i
         self.vocab = vocab
@@ -128,14 +126,7 @@ class LSTMGuesser(nn.Module):
     def forward(self, question_text, question_len):
         print("In the forward method")
 
-        # Feed questions into the embedding
-        #text_emb = self.embeddings(question_text)
-
-        # Probably have to squeeze these so they have the dimensions of the input for lstm
-
         #Get the output of LSTM - (output dim: batch_size x batch_max_len x lstm_hidden_dim)
-        print(question_text.size())
-        print(question_text)
         output, _ = self.lstm(question_text)
 
         # Pass through a dropout layer
@@ -147,7 +138,7 @@ class LSTMGuesser(nn.Module):
         reshape = out.contiguous().view(-1, output.size(2))
         
         #Get logits from the final linear layer
-        logits = self.hidden_to_label(reshape)
+        logits = self.hidden(reshape)
         
         #--shape of logits -> (batch_size, seq_len, self.n_output)
         return logits
@@ -232,8 +223,6 @@ def train_model(model, checkpoint, grad_clippings, save_name, train_data_loader,
         question_len = batch['len']
         labels = batch['labels']
 
-        print(question_text)
-
         out = model(question_text, question_len)
         optimizer.zero_grad()
         loss = criterion(out, labels)
@@ -271,12 +260,13 @@ def batchify(batch):
         label_list.append(ex[1])
 
     target_labels = torch.LongTensor(label_list)
-    x1 = torch.FloatTensor(len(question_len), max(question_len)).zero_()
+    longest_q = max(question_len)
+    x1 = torch.FloatTensor(len(question_len), max(question_len), 300).zero_()
     for i in range(len(question_len)):
         question_text = batch[i][0]
         vec = torch.FloatTensor(question_text)
-        x1[i, :len(question_text)].copy_(vec.squeeze())
-    q_batch = {'text': x1, 'len': torch.FloatTensor(question_len), 'labels': target_labels}
+        x1[i, :len(question_text)].copy_(vec)
+    q_batch = {'text': x1, 'len': torch.LongTensor(question_len), 'labels': target_labels}
     print ("In the batch")
     return q_batch
 
@@ -569,14 +559,12 @@ def train():
             }, f)
 
     # Create the model
-    model = LSTMGuesser(i_to_w, w_to_i, vocab, n_input = 150, n_output = len(vocab))
-    #model.embeddings = nn.Embedding.from_pretrained(embeddings)
+    model = LSTMGuesser(i_to_w, w_to_i, vocab, n_input = 300, n_output = len(vocab))
 
     # Determining if we are using cpu or gpu
     device = torch.device('cpu')
 
     # Converting our training and dev data into dataloaders which work well with training our RNN
-    #train_sampler = torch.utils.data.sampler.RandomSampler(training_vectors, device)
     train_dataset = QuestionDataset(training_vectors, w_to_i, len(vocab), embeddings)
     train_sampler = torch.utils.data.sampler.RandomSampler(training_vectors)
 
