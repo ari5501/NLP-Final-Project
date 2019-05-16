@@ -13,6 +13,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 #import gensim
@@ -26,8 +27,8 @@ nltk.download('punkt')
 from sklearn.feature_extraction.text import TfidfVectorizer
 from flask import Flask, jsonify, request
 
-from . import util
-from .dataset import QuizBowlDataset
+import util
+from dataset import QuizBowlDataset
 
 
 MODEL_PATH = 'rnn.pickle'
@@ -64,16 +65,24 @@ class QuestionDataset():
         self.questions = []
         self.labels = []
 
+        if (class2ind == None):
+            self.class2ind = dict()
+        else:
+            self.class2ind = class2ind
+
         for qq, ll in examples:
             self.questions.append(qq)
             self.labels.append(ll)
         
         if type(self.labels[0])==str:
+            class_num = 0
             for i in range(len(self.labels)):
                 try:
-                    self.labels[i] = class2ind[self.labels[i]]
+                    self.labels[i] = self.class2ind[self.labels[i]]
                 except:
-                    self.labels[i] = num_classes
+                    self.labels[i] = class_num
+                    self.class2ind[self.labels[i]] = class_num
+                    class_num += 1
         self.word2ind = word2ind
         self.embeddings = embedding
     
@@ -105,7 +114,7 @@ class QuestionDataset():
 class LSTMGuesser(nn.Module):
     # n_input represents dimensionality of each word embedding as a vector 
     # n_output is number of answers (unique)
-    def __init__(self, i_to_w, w_to_i, n_input = 100, n_hidden = 100, n_output = 300, dropout = 0.3):
+    def __init__(self, i_to_w, w_to_i, n_input = 100, n_hidden = 128, n_output = 300, dropout = 0.3):
         super(LSTMGuesser, self).__init__()
         
         self.n_input = n_input  # size of longest question
@@ -117,6 +126,7 @@ class LSTMGuesser(nn.Module):
         self.lstm = nn.LSTM(self.n_input, self.n_hidden)
         self.dropout = nn.Dropout(dropout)
         self.hidden = nn.Linear(self.n_hidden, self.n_output) # this layer might not be needed
+        self.softmax = nn.Softmax()
 
         self.i_to_w = i_to_w
         self.w_to_i = w_to_i
@@ -130,18 +140,27 @@ class LSTMGuesser(nn.Module):
         #text_embed = self.embeddings(question_text)
         #Get the output of LSTM - (output dim: batch_size x batch_max_len x lstm_hidden_dim)
         output, _ = self.lstm(question_text)
+        print("output: ", output.size()) #128 x 202 x 128
 
         # Pass through a dropout layer
-        out = self.dropout(output)
+        out = self.dropout(output) 
+
+        print("after dropout: ", out.size()) #same dims
         
+        #return out
+
         #reshape (before passing to linear layer) so that each row contains one token 
         #essentially, flatten the output of LSTM 
         #dim will become batch_size*batch_max_len x lstm_hidden_dim
-        reshape = out.contiguous().view(-1, output.size(2))
+        reshape = out.contiguous().view(-1, self.n_hidden)
         
+        print("reshape: ", reshape.size())
         #Get logits from the final linear layer
         logits = self.hidden(reshape)
-        
+        logits = logits.view(128, -1, 1)
+        logits = logits.squeeze()
+        print("logits: ", logits.size()) # should be linear 
+
         #--shape of logits -> (batch_size, seq_len, self.n_output)
         return logits
 
@@ -215,9 +234,12 @@ def train_model(model, checkpoint, grad_clippings, save_name, train_data_loader,
         question_text = batch['text'].to(device)
         question_len = batch['len']
         labels = batch['labels']
+        print(question_text, question_len)
 
         out = model(question_text, question_len)
         optimizer.zero_grad()
+        print("out: ", out.size())
+        print("labels: ", labels)
         loss = criterion(out, labels)
         loss.backward()
         optimizer.step()
@@ -309,7 +331,7 @@ def load_vectors_wo_w2v(fname):
         if index % 10000 == 0:
             print(word)
             print ("Up to ", index, " words")
-        if index >= 50000:
+        if index >= 10000:
             break
 
     #tensor = torch.FloatTensor(data)
@@ -514,7 +536,7 @@ def download(local_qanta_prefix, retrieve_paragraphs):
 
 
 if __name__ == '__main__':
-    cli()
+    train()
 
 
 #longest_q = longest_training_q if longest_training_q > longest_dev_q else longest_dev_q
