@@ -64,11 +64,9 @@ class QuestionDataset():
     def __init__(self, examples, word2ind, num_classes, embedding, class2ind=None):
         self.questions = []
         self.labels = []
+        self.class2ind = class2ind
 
-        if (class2ind == None):
-            self.class2ind = dict()
-        else:
-            self.class2ind = class2ind
+        #print("class2ind: ", class2ind)
 
         for qq, ll in examples:
             self.questions.append(qq)
@@ -77,12 +75,13 @@ class QuestionDataset():
         if type(self.labels[0])==str:
             class_num = 0
             for i in range(len(self.labels)):
+               # print("label: ", self.labels[i])
                 try:
                     self.labels[i] = self.class2ind[self.labels[i]]
                 except:
-                    self.labels[i] = class_num
-                    self.class2ind[self.labels[i]] = class_num
-                    class_num += 1
+                    self.labels[i] = num_classes
+#                    self.class2ind[self.labels[i]] = class_num
+#                    class_num += 1
         self.word2ind = word2ind
         self.embeddings = embedding
     
@@ -125,7 +124,8 @@ class LSTMGuesser(nn.Module):
         #self.embeddings = nn.Embedding(self.vocabsize, EMB_DIM)
         self.lstm = nn.LSTM(self.n_input, self.n_hidden)
         self.dropout = nn.Dropout(dropout)
-        self.hidden = nn.Linear(self.n_hidden, self.n_output) # this layer might not be needed
+        self.hidden = nn.Linear(self.n_hidden * 300, self.n_output) # this layer might not be needed
+        print("output:", n_output)
         self.softmax = nn.Softmax()
 
         self.i_to_w = i_to_w
@@ -152,12 +152,12 @@ class LSTMGuesser(nn.Module):
         #reshape (before passing to linear layer) so that each row contains one token 
         #essentially, flatten the output of LSTM 
         #dim will become batch_size*batch_max_len x lstm_hidden_dim
-        reshape = out.contiguous().view(-1, self.n_hidden)
+        reshape = out.contiguous().view(-1, self.n_hidden * 300)
         
         print("reshape: ", reshape.size())
         #Get logits from the final linear layer
         logits = self.hidden(reshape)
-        logits = logits.view(128, -1, 1)
+        logits = logits.view(self.n_hidden, -1, 1)
         logits = logits.squeeze()
         print("logits: ", logits.size()) # should be linear 
 
@@ -241,7 +241,9 @@ def train_model(model, checkpoint, grad_clippings, save_name, train_data_loader,
         print("out: ", out.size())
         print("labels: ", labels)
         loss = criterion(out, labels)
+        print("back")
         loss.backward()
+        print("optimize step")
         optimizer.step()
 
         clip_grad_norm_(model.parameters(), grad_clippings) 
@@ -270,7 +272,8 @@ def batchify(batch):
 
     target_labels = torch.LongTensor(label_list)
     longest_q = max(question_len)
-    x1 = torch.FloatTensor(len(question_len), max(question_len), 300).zero_()
+    # num questions, max question len, embeddings dim
+    x1 = torch.FloatTensor(len(question_len), 300, 300).zero_()
     for i in range(len(question_len)):
         question_text = batch[i][0]
         vec = torch.FloatTensor(question_text)
@@ -393,6 +396,16 @@ def load_data(filename, lim):
                 data.append((q_text, label))
     return data
 
+def class_labels(data):
+    class_to_i = {}
+    i_to_class = {}
+    i = 0
+    for _, ans in data:
+        if ans not in class_to_i.keys():
+            class_to_i[ans] = i
+            i_to_class[i] = ans
+            i+=1
+    return class_to_i, i_to_class
 
 ### Begin app stuff ###
 
@@ -502,12 +515,14 @@ def train():
     # Determining if we are using cpu or gpu
     device = torch.device('cpu')
 
+    class_to_ind, ind_to_class = class_labels(training_vectors+dev_vectors)
+
     # Converting our training and dev data into dataloaders which work well with training our RNN
-    train_dataset = QuestionDataset(training_vectors, w_to_i, num_classes, embeddings)
+    train_dataset = QuestionDataset(training_vectors, w_to_i, num_classes, embeddings, class_to_ind)
     train_sampler = torch.utils.data.sampler.RandomSampler(training_vectors)
 
 
-    dev_dataset = QuestionDataset(dev_vectors, w_to_i, num_classes, embeddings)
+    dev_dataset = QuestionDataset(dev_vectors, w_to_i, num_classes, embeddings, class_to_ind)
     dev_sampler = torch.utils.data.sampler.RandomSampler(dev_vectors)
     dev_loader = DataLoader(dev_vectors, batch_size=batch_size, sampler=dev_sampler, num_workers=0,
                                            collate_fn=batchify)
