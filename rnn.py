@@ -27,8 +27,8 @@ nltk.download('punkt')
 from sklearn.feature_extraction.text import TfidfVectorizer
 from flask import Flask, jsonify, request
 
-import util
-from dataset import QuizBowlDataset
+from . import util
+from .dataset import QuizBowlDataset
 
 
 MODEL_PATH = 'rnn.pickle'
@@ -195,20 +195,14 @@ class LSTMGuesser(nn.Module):
 def guess(model, questions_text, max_guesses):
 
     # turn question text into feature vector - turn
-    question_len = 0
-    table = str.maketrans('', '', string.punctuation)
-    for question in questions_text:
-        # do we want to separate by sentences somehow? I just got rid of the period
-        full_question = ''.join(str(sentence) for sentence in question)
-        #print (full_question)
-        tokens = full_question.replace('.', ' ')
-        tokens = tokens.rstrip().split(' ')
-        for token in tokens:
-            # cleaning data
-            token = token.translate(table)
-            token = token.lower()
+    q_text = nltk.word_tokenize(questions_text)
+    question_len = len(q_text)
 
-            question_len += 1
+    # Now have to vectorize q_text
+    x1 = torch.FloatTensor(1, question_len, EMB_DIM).zero_()
+    question_text = []
+    vec = torch.FloatTensor(question_text)
+    x1[1, :len(question_text)].copy_(vec)
 
     # put feature vector into the model - model(feature_vector, length)
     logits = model(questions_text, question_len)
@@ -273,7 +267,7 @@ def batchify(batch):
     target_labels = torch.LongTensor(label_list)
     longest_q = max(question_len)
     # num questions, max question len, embeddings dim
-    x1 = torch.FloatTensor(len(question_len), 300, 300).zero_()
+    x1 = torch.FloatTensor(len(question_len), longest_q, EMB_DIM).zero_()
     for i in range(len(question_len)):
         question_text = batch[i][0]
         vec = torch.FloatTensor(question_text)
@@ -388,7 +382,16 @@ def load_data(filename, lim):
             questions = json.load(json_data)["questions"][:lim]
         else:
             questions = json.load(json_data)["questions"]
+        '''
         for q in questions:
+            q_text = nltk.word_tokenize(q['text'])
+            #label = q['category']
+            label = q['page']
+            if label:
+                data.append((q_text, label))
+        '''
+        for i in range(0,200):
+            q = questions[i]
             q_text = nltk.word_tokenize(q['text'])
             #label = q['category']
             label = q['page']
@@ -551,199 +554,5 @@ def download(local_qanta_prefix, retrieve_paragraphs):
 
 
 if __name__ == '__main__':
-    train()
-
-
-#longest_q = longest_training_q if longest_training_q > longest_dev_q else longest_dev_q
-#model = LSTMGuesser(n_input = longest_q, n_output = len(vocab))
-
-'''
-# Creating/loading the train and dev vectors
-train_exists = os.path.isfile('training_vectors.pickle')
-if train_exists:
-    print("Loading training vectors")
-    with open('training_vectors.pickle', 'rb') as f:
-        params = pickle.load(f)
-        training_vectors = params['training_vectors']
-        longest_training_q = params['longest_q]
-else:
-    print ("Attempting to create training vectors")
-    training_vectors, longest_training_q = get_data_info(training_data, model.embeddings)
-    with open('training_vectors.pickle', 'wb') as f:
-        pickle.dump({
-            'training_vectors' : training_vectors
-            'longest_q' : longest_training_q
-        }, f)
-
-dev_exists = os.path.isfile('dev_vectors.pickle')
-if dev_exists:
-    print("Loading dev vectors")
-    with open('dev_vectors.pickle', 'rb') as f:
-        params = pickle.load(f)
-        dev_vectors = params['dev_vectors']
-        longest_dev_q = params['longest_q]
-else:
-    print ("Attempting to create dev vectors")
-    dev_vectors, longest_dev_q = get_data_info(dev_data, model.embeddings)
-    with open('dev_vectors.pickle', 'wb') as f:
-        pickle.dump({
-            'dev_vectors' : dev_vectors
-            'longest_q' : longest_dev_q
-        }, f)
-
-print("Training verctor shape is: ", training_vectors[0].shape)
-print("Dev verctor shape is: ", dev_vectors[0].shape)
-'''
-
-
-'''
-'''
-
-'''
-    # getting the vocabulary
-    vocab_exists = os.path.isfile('vocab.pickle')
-    if vocab_exists:
-        print ("Loading vocab")
-        with open('vocab.pickle', 'rb') as f:
-            print('Vocab is loaded')
-            params = pickle.load(f)
-            vocab = params['vocab']
-    else:
-        vocab = get_vocabulary(training_data, dev_data)
-        with open('vocab.pickle', 'wb') as f:
-            pickle.dump({
-                'vocab' : vocab
-            }, f)
-'''
-
-
-'''
-# This turns our actual questions and answers into embeddings
-def get_data_info(training_data, embeddings):
-    questions = training_data[0]
-    answers = training_data[1]
-
-    questions_vector = [] # 3d array to represent the question vector
-    answer_vector = {} # We just map the answers to a unique index
-
-    # Get length of longest question
-    longest_question_len = 0
-    
-    idx = 0
-    for answer in answers:
-        answer_vector[answer] = idx
-        idx += 1
-
-    # For cleaning the data
-    table = str.maketrans('', '', string.punctuation)
-
-    count = 1
-    token_vector = list(embeddings['pizza'])
-    embeddings['pizza'] = token_vector
-    embedding_dim = len(embeddings['pizza'])
-
-    # tokenize the question and get it into a list of words, get the embedding of each word,
-    # store that embedding for the word in a list, and go on to the next part
-    for question in questions:
-        question_embedding = []
-        cur_question_len = 0
-        # do we want to separate by sentences somehow? I just got rid of the period
-        full_question = ''.join(str(sentence) for sentence in question)
-        #print (full_question)
-        tokens = full_question.replace('.', ' ')
-        tokens = tokens.rstrip().split(' ')
-        for token in tokens:
-            # cleaning data
-            token = token.translate(table)
-            token = token.lower()
-
-            cur_question_len += 1
-
-            # putting each question vector in a list
-            if token in embeddings:
-                if type(embeddings[token]) == list:
-                    token_vector = embeddings[token]
-                else:
-                    token_vector = list(embeddings[token])
-                    embeddings[token] = token_vector
-                question_embedding.append(token_vector) 
-            else: # just give them random weights
-                token_vector = np.random.normal(scale=0.6, size=(embedding_dim, ))
-                token_vector = token_vector.tolist()
-                question_embedding.append(token_vector) 
-
-        if cur_question_len > longest_question_len:
-            longest_question_len = cur_question_len
-
-        #print(question_embedding)
-        print ("About to add question #", count, " to the embeddings")
-        count += 1
-        question_embedding = torch.FloatTensor(question_embedding)
-        questions_vector.append(question_embedding)
-    
-    print("Attempting to stack the vectors")
-    tensor = torch.stack(questions_vector)
-
-    #print("Type of tensor is ", type(tensor))
-    #print("Tensor dimensions are: ", tensor.size())
-
-    full_data = []
-    full_data.append(question_embedding)
-    full_data.append(answer_vector)
-    
-    return full_data, longest_question_len
-'''
-
-'''
-# Gets the vocabulary for all the words we will be learning
-def get_vocabulary(train_data, dev_data):
-    train_questions = train_data[0]
-    train_answers = train_data[1]
-
-    dev_questions = dev_data[0]
-    dev_answers = dev_data[1]
-
-    vocab = {}
-    index = 0
-
-    table = str.maketrans('', '', string.punctuation)
-
-    for question in train_questions:
-        full_question = ''.join(str(sentence) for sentence in question)
-        tokens = full_question.replace('.', ' ')
-        tokens = tokens.rstrip().split(' ')
-        for token in tokens:
-            if token not in vocab:
-                vocab[token] = index
-                index += 1
-
-    for question in dev_questions:
-        full_question = ''.join(str(sentence) for sentence in question)
-        tokens = full_question.replace('.', ' ')
-        tokens = tokens.rstrip().split(' ')
-        for token in tokens:
-            if token not in vocab:
-                vocab[token] = index
-                index += 1
-
-    for answer in train_answers:
-        full_answer = ''.join(str(sentence) for sentence in answer)
-        tokens = full_answer.replace('.', ' ')
-        tokens = tokens.rstrip().split(' ')
-        for token in tokens:
-            if token not in vocab:
-                vocab[token] = index
-                index += 1
-
-    for answer in dev_answers:
-        full_answer = ''.join(str(sentence) for sentence in answer)
-        tokens = full_answer.replace('.', ' ')
-        tokens = tokens.rstrip().split(' ')
-        for token in tokens:
-            if token not in vocab:
-                vocab[token] = index
-                index += 1
-
-    return vocab
-
-'''
+    #train()
+    cli()
