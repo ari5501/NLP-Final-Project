@@ -15,8 +15,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
-#import gensim
-#from gensim.models import KeyedVectors
 
 import click
 import numpy as np
@@ -55,17 +53,11 @@ def batch_guess_and_buzz(model, questions) -> List[Tuple[str, bool]]:
 
 # Class for converting the tokenized data into vectors
 class QuestionDataset():
-    """
-    Pytorch data class for questions
-    """
 
-    ###You don't need to change this funtion
     def __init__(self, examples, word2ind, num_classes, embedding, class2ind=None):
         self.questions = []
         self.labels = []
         self.class2ind = class2ind
-
-        #print("class2ind: ", class2ind)
 
         for qq, ll in examples:
             self.questions.append(qq)
@@ -74,22 +66,17 @@ class QuestionDataset():
         if type(self.labels[0])==str:
             class_num = 0
             for i in range(len(self.labels)):
-               # print("label: ", self.labels[i])
                 try:
                     self.labels[i] = self.class2ind[self.labels[i]]
                 except:
                     self.labels[i] = num_classes
-#                    self.class2ind[self.labels[i]] = class_num
-#                    class_num += 1
         self.word2ind = word2ind
         self.embeddings = embedding
     
-    ###You don't need to change this funtion
     def __getitem__(self, index):
         return self.vectorize(self.questions[index], self.embeddings, self.word2ind), \
           self.labels[index]
     
-    ###You don't need to change this funtion
     def __len__(self):
         return len(self.questions)
 
@@ -108,6 +95,19 @@ class QuestionDataset():
         return vec_text
 
 
+# Gets the class label to index and index to class label
+def class_labels(data):
+    class_to_i = {}
+    i_to_class = {}
+    i = 0
+    for _, ans in data:
+        if ans not in class_to_i.keys():
+            class_to_i[ans] = i
+            i_to_class[i] = ans
+            i+=1
+    return class_to_i, i_to_class
+
+
 # Guesser for our model that's implemented as an LSTM
 class LSTMGuesser(nn.Module):
     # n_input represents dimensionality of each word embedding as a vector 
@@ -118,18 +118,14 @@ class LSTMGuesser(nn.Module):
         self.n_input = n_input  # size of longest question
         self.n_hidden = n_hidden # This is a hyperparameter so it could be anything
         self.n_output = n_output # amount of answers unique answers / classes
-        #self.vocabsize = len(vocab)
 
-        #self.embeddings = nn.Embedding(self.vocabsize, EMB_DIM)
         self.lstm = nn.LSTM(self.n_input, self.n_hidden, batch_first=True)
         self.dropout = nn.Dropout(dropout)
         self.hidden = nn.Linear(self.n_hidden, self.n_output) # this layer might not be needed
-        print("output:", n_output)
-        self.softmax = nn.Softmax()
+        #print("output:", n_output)
 
         self.i_to_w = i_to_w
         self.w_to_i = w_to_i
-        #self.vocab = vocab
 
 
     # Model forward pass, returns the logits of the predictions.
@@ -138,7 +134,7 @@ class LSTMGuesser(nn.Module):
 
         #Get the output of LSTM - (output dim: batch_size x batch_max_len x lstm_hidden_dim)
         output, _ = self.lstm(question_text)
-        print("output: ", output.size()) #128 x 202 x 128
+        print("output: ", output.size()) #128 x longest_q x 128
 
         # Pass through a dropout layer
         out = self.dropout(output) 
@@ -149,10 +145,12 @@ class LSTMGuesser(nn.Module):
         #essentially, flatten the output of LSTM 
         #dim will become batch_size*batch_max_len x lstm_hidden_dim
         reshape = out.contiguous().view(-1, out.size(2))
-        
         print("reshape: ", reshape.size())
+
         #Get logits from the final linear layer
         logits = self.hidden(reshape)
+
+        # Reshape to fit into the loss function
         logits = logits.view(self.n_hidden, -1, 1)
         logits = logits.squeeze()
         print("logits: ", logits.size()) # should be linear 
@@ -169,12 +167,11 @@ class LSTMGuesser(nn.Module):
                 'hidden' : self.hidden,
                 'i_to_w' : self.i_to_w,
                 'w_to_i' : self.w_to_i
-                #'vocab' : self.vocab,
-                #'embeddings' : self.embeddings
             }, f)
     
-    def load(self):
-        with open('rnn.pickle', 'wb') as f:
+    @classmethod
+    def load(cls):
+        with open('rnn.pickle', 'rb') as f:
             params = pickle.load(f)
             guesser = LSTMGuesser()
             guesser.lstm = params['lstm']
@@ -182,41 +179,43 @@ class LSTMGuesser(nn.Module):
             guesser.hidden = params['hidden']
             guesser.i_to_w = params['i_to_w']
             guesser.w_to_i = params['w_to_i']
-            #guesser.vocab = params['vocab']
-            #guesser.embeddings = params['embeddings']
             return guesser
 
 # Get label that corresponds to the maximum logit
 # This is definitely not correct
 def guess(model, questions_text, max_guesses, embeddings, word2ind):
 
-    # turn question text into feature vector - turn
-    q_text = nltk.word_tokenize(questions_text)
-    question_len = len(q_text)
+    guesses = []
+    for question in questions_text:
+        # turn question text into feature vector - turn
+        q_text = nltk.word_tokenize(question)
+        question_len = len(q_text)
 
-    # Now have to vectorize q_text
-    question_tensor = torch.FloatTensor(1, question_len, EMB_DIM).zero_()
-    question_text = []
-    for q in q_text:
-        cur_word = q.lower()
-        if cur_word in word2ind:
-            vec_text[i] = embeddings[word2ind[cur_word]]
-        else:
-            token_vector = np.random.normal(scale=0.6, size=(EMB_DIM, ))
-            vec_text[i] = token_vector.tolist()
+        # Now have to vectorize q_text
+        question_tensor = torch.FloatTensor(1, question_len, EMB_DIM).zero_()
+        question_text = []
+        for q in q_text:
+            cur_word = q.lower()
+            if cur_word in word2ind:
+                vec_text[i] = embeddings[word2ind[cur_word]]
+            else:
+                token_vector = np.random.normal(scale=0.6, size=(EMB_DIM, ))
+                vec_text[i] = token_vector.tolist()
 
-    # Converting vectorized q_text to a tensor
-    vec = torch.FloatTensor(question_text)
-    question_tensor[1, :len(question_text)].copy_(vec)
+        # Converting vectorized q_text to a tensor
+        vec = torch.FloatTensor(question_text)
+        question_tensor[1, :len(question_text)].copy_(vec)
 
-    # put feature vector into the model - model(feature_vector, length)
-    logits = model(question_tensor, question_len)
+        # put feature vector into the model - model(feature_vector, length)
+        logits = model(question_tensor, question_len)
 
-    # the logits returned would be an array of all the labels, and we want the maximum value
-    top_n, top_i = logits.topk(1) # This might want to change to a larger number
+        # the logits returned would be an array of all the labels, and we want the maximum value
+        top_n, top_i = logits.topk(1) # This might want to change to a larger number
 
-    # figure out what the best label correpsonds to
-    return model.i_to_w[top_i] # This probably needs to be done differently
+        # figure out what the best label correpsonds to
+        guesses.append(model.i_to_w[top_i]) # This probably needs to be done differently
+    
+    return guesses
 
 
 
@@ -234,7 +233,6 @@ def train_model(model, checkpoint, grad_clippings, save_name, train_data_loader,
         question_text = batch['text'].to(device)
         question_len = batch['len']
         labels = batch['labels']
-        #print(question_text.size())
 
         out = model(question_text, question_len)
         optimizer.zero_grad()
@@ -262,7 +260,7 @@ def train_model(model, checkpoint, grad_clippings, save_name, train_data_loader,
     return accuracy
 
 
-
+# Convert a certain number of questions into a batch so the program can work on multiple at a time
 def batchify(batch):
     question_len = list()
     label_list = list()
@@ -272,6 +270,7 @@ def batchify(batch):
 
     target_labels = torch.LongTensor(label_list)
     longest_q = max(question_len)
+
     # num questions, max question len, embeddings dim
     x1 = torch.FloatTensor(len(question_len), longest_q, EMB_DIM).zero_()
     for i in range(len(question_len)):
@@ -281,6 +280,24 @@ def batchify(batch):
     q_batch = {'text': x1, 'len': torch.LongTensor(question_len), 'labels': target_labels}
     print ("In the batch")
     return q_batch
+
+# This needs to change, but Pranav said it shouldn't be too different
+def evaluate(data_loader, model, device):
+    model.eval()
+    num_examples = 0
+    error = 0
+    for idx, batch in enumerate(data_loader):
+        question_text = batch['text'].to(device)
+        question_len = batch['len']
+        labels = batch['labels']
+
+        logits = model(question_text, question_len)
+        top_n, top_i = logits.topk(1)
+        num_examples += question_text.size(0)
+        error += torch.nonzero(top_i.squeeze() - torch.LongTensor(labels)).size(0)
+    accuracy = 1 - error / num_examples
+    print('accuracy', accuracy)
+    return accuracy
 
 
 # Loads the embeddings if they already exist or create and save them otherwise
@@ -296,7 +313,6 @@ def load_fast_text_embeddings():
     else:
         # Getting the embeddings from FastText
         print("Attempting to create the embeddings")
-        #embeddings = KeyedVectors.load_word2vec_format('wiki-news-300d-1m.vec', limit=300000)
         embeddings = load_vectors_wo_w2v('wiki-news-300d-1m.vec')
         with open('embeddings.pickle', 'wb') as f:
             pickle.dump({
@@ -336,82 +352,8 @@ def load_vectors_wo_w2v(fname):
         if index >= 10000:
             break
 
-    #tensor = torch.FloatTensor(data)
     return data, word_to_index, index_to_word, words
 
-
-# Getting the dev data for our pytorch model
-def get_dev_data(dataset):
-    dev_examples = []
-    dev_pages = []
-    questions = []
-    if dataset.guesser_train:
-        questions.extend(dataset.db.guess_dev_questions)
-
-    for q in questions:
-        dev_examples.append(q.sentences)
-        dev_pages.append(q.page)
-
-    return dev_examples, dev_pages, None
-
-
-# This needs to change, but Pranav said it shouldn't be too different
-def evaluate(data_loader, model, device):
-    model.eval()
-    num_examples = 0
-    error = 0
-    for idx, batch in enumerate(data_loader):
-        question_text = batch['text'].to(device)
-        question_len = batch['len']
-        labels = batch['labels']
-
-        logits = model(question_text, question_len)
-        top_n, top_i = logits.topk(1)
-        num_examples += question_text.size(0)
-        error += torch.nonzero(top_i.squeeze() - torch.LongTensor(labels)).size(0)
-    accuracy = 1 - error / num_examples
-    print('accuracy', accuracy)
-    return accuracy
-
-
-# Loads the data and then tokenizes it
-def load_data(filename, lim):
-    files = os.listdir(os.curdir)
-    dataset_path=os.path.join('data', filename)
-
-    data = list()
-    with open(dataset_path) as json_data:
-        if lim>0:
-            questions = json.load(json_data)["questions"][:lim]
-        else:
-            questions = json.load(json_data)["questions"]
-        '''
-        for q in questions:
-            q_text = nltk.word_tokenize(q['text'])
-            #label = q['category']
-            label = q['page']
-            if label:
-                data.append((q_text, label))
-        '''
-        for i in range(0,1280):
-            q = questions[i]
-            q_text = nltk.word_tokenize(q['text'])
-            label = q['page']
-            if label:
-                data.append((q_text, label))
-    return data
-
-# Gets the class label to index and index to class label
-def class_labels(data):
-    class_to_i = {}
-    i_to_class = {}
-    i = 0
-    for _, ans in data:
-        if ans not in class_to_i.keys():
-            class_to_i[ans] = i
-            i_to_class[i] = ans
-            i+=1
-    return class_to_i, i_to_class
 
 # Loads the tokenized data if it exists, and creates it if it doesn't
 def load_tokenized_data():
@@ -445,6 +387,27 @@ def load_tokenized_data():
 
     return training_vectors, dev_vectors
 
+# Loads the data and then tokenizes it
+def load_data(filename, lim):
+    files = os.listdir(os.curdir)
+    dataset_path=os.path.join('data', filename)
+
+    data = list()
+    with open(dataset_path) as json_data:
+        if lim>0:
+            questions = json.load(json_data)["questions"][:lim]
+        else:
+            questions = json.load(json_data)["questions"]
+        '''
+        for q in questions:
+        '''
+        for i in range(0,1280):                     # Replace these
+            q = questions[i]                        # two lines
+            q_text = nltk.word_tokenize(q['text'])
+            label = q['page']
+            if label:
+                data.append((q_text, label))
+    return data
 
 def answer_to_index(train_tokenized):
     answer_to_index = {}
@@ -464,13 +427,13 @@ def answer_to_index(train_tokenized):
 
 def create_app(enable_batch=True):
     rnn_guesser = LSTMGuesser.load()
-    embeddings, w_to_i, i_to_w, words  = load_fast_text_embeddings()
+    embeddings, word_2_index, index_to_word, words  = load_fast_text_embeddings()
     app = Flask(__name__)
 
     @app.route('/api/1.0/quizbowl/act', methods=['POST'])
     def act():
         question = request.json['text']
-        guess, buzz = guess_and_buzz(rnn_guesser, question, embeddings, w_to_i)
+        guess, buzz = guess_and_buzz(rnn_guesser, question, embeddings, word_2_index)
         return jsonify({'guess': guess, 'buzz': True if buzz else False})
 
     @app.route('/api/1.0/quizbowl/status', methods=['GET'])
@@ -487,7 +450,7 @@ def create_app(enable_batch=True):
         questions = [q['text'] for q in request.json['questions']]
         return jsonify([
             {'guess': guess, 'buzz': True if buzz else False}
-            for guess, buzz in batch_guess_and_buzz(rnn_guesser, questions)
+            for guess, buzz in batch_guess_and_buzz(rnn_guesser, questions, embeddings, word_2_index)
         ])
 
 
