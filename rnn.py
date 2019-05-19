@@ -233,8 +233,9 @@ def guess(model, questions_text, max_guesses, embeddings, word2ind):
             confidence = top_n[i]
             guess_i = [answer, confidence]
             cur_guesses.append(guess_i) # This probably needs to be done differently
+            print("ans:", answer, "| confidence:", confidence)
         guesses.append(cur_guesses)
-    
+
     return guesses
 
 
@@ -369,7 +370,7 @@ def load_vectors_wo_w2v(fname):
         if index % 10000 == 0:
             print(word)
             print ("Up to ", index, " words")
-        if index >= 10000:
+        if index >= 300000:
             break
 
     return data, word_to_index, index_to_word, words
@@ -554,7 +555,7 @@ def train():
     ans_to_i, i_to_ans = answer_to_index(train_tokenized)
 
     # Create the model
-    model = LSTMGuesser(longest_q, i_to_w= i_to_ans, w_to_i = ans_to_i, n_input = EMB_DIM, n_output = num_classes)
+    model = LSTMGuesser(longest_q_length, i_to_w= i_to_ans, w_to_i = ans_to_i, n_input = EMB_DIM, n_output = num_classes)
 
     # Determining if we are using cpu or gpu
     device = torch.device('cpu')
