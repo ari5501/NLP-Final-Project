@@ -20,13 +20,13 @@ import click
 import numpy as np
 import nltk
 #nltk.download('punkt')
-nltk.download('averaged_perceptron_tagger')
+#nltk.download('averaged_perceptron_tagger')
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from flask import Flask, jsonify, request
 
-from . import util
-from .dataset import QuizBowlDataset
+import util
+from dataset import QuizBowlDataset
 
 
 MODEL_PATH = 'rnn.pickle'
@@ -37,6 +37,7 @@ EMB_DIM = 300
 
 def guess_and_buzz(model, question_text, embeddings, word_2_index) -> Tuple[str, bool]:
     guesses = guess(model, [question_text], BUZZ_NUM_GUESSES, embeddings, word_2_index)[0]
+    print (guesses)
     scores = [guess[1] for guess in guesses]
     buzz = scores[0] / sum(scores) >= BUZZ_THRESHOLD
     return guesses[0][0], buzz
@@ -113,7 +114,7 @@ def class_labels(data):
 class LSTMGuesser(nn.Module):
     # n_input represents dimensionality of each word embedding as a vector 
     # n_output is number of answers (unique)
-    def __init__(self, i_to_w = None, w_to_i = None, n_input = 100, n_hidden = 128, n_output = 300, dropout = 0.3):
+    def __init__(self, longest_q = 202, i_to_w = None, w_to_i = None, n_input = 100, n_hidden = 128, n_output = 300, dropout = 0.3):
         super(LSTMGuesser, self).__init__()
         
         self.n_input = n_input  # size of longest question
@@ -127,6 +128,7 @@ class LSTMGuesser(nn.Module):
 
         self.i_to_w = i_to_w
         self.w_to_i = w_to_i
+        self.longest_q = longest_q
 
 
     # Model forward pass, returns the logits of the predictions.
@@ -150,6 +152,7 @@ class LSTMGuesser(nn.Module):
 
         #Get logits from the final linear layer
         logits = self.hidden(reshape)
+        print(logits.size())
 
         # Reshape to fit into the loss function
         logits = logits.view(self.n_hidden, -1, 1)
@@ -167,7 +170,8 @@ class LSTMGuesser(nn.Module):
                 'dropout' : self.dropout,
                 'hidden' : self.hidden,
                 'i_to_w' : self.i_to_w,
-                'w_to_i' : self.w_to_i
+                'w_to_i' : self.w_to_i,
+                'longest_q' : self.longest_q
             }, f)
     
     @classmethod
@@ -180,6 +184,7 @@ class LSTMGuesser(nn.Module):
             guesser.hidden = params['hidden']
             guesser.i_to_w = params['i_to_w']
             guesser.w_to_i = params['w_to_i']
+            #guesser.longest_q = params['longest_q']
             return guesser
 
 # Get label that corresponds to the maximum logit
@@ -189,11 +194,11 @@ def guess(model, questions_text, max_guesses, embeddings, word2ind):
     guesses = []
     for question in questions_text:
         # turn question text into feature vector - turn
-        q_text = nltk.word_tokenize(question)
+        q_text = nltk.word_tokenize(question)[:128]
         question_len = len(q_text)
 
         # Now have to vectorize q_text
-        question_tensor = torch.FloatTensor(1, question_len, EMB_DIM).zero_()
+        question_tensor = torch.FloatTensor(1, 128, EMB_DIM).zero_()
         vec_text = [0] * question_len
         question_text = []
         for i in range(len(q_text)):
@@ -205,17 +210,30 @@ def guess(model, questions_text, max_guesses, embeddings, word2ind):
                 vec_text[i] = token_vector.tolist()
 
         # Converting vectorized q_text to a tensor
-        vec = torch.FloatTensor(question_text)
-        question_tensor[0, :len(question_text)].copy_(vec)
+        vec = torch.FloatTensor(vec_text)
+        #print("vec: ", vec)
+        #print("questiontext: ", vec_text)
+        question_tensor[0, :len(vec_text)].copy_(vec)
 
         # put feature vector into the model - model(feature_vector, length)
-        logits = model(question_tensor, question_len)
+        question_length = torch.LongTensor([question_len])
+        logits = model(question_tensor, question_length)
 
         # the logits returned would be an array of all the labels, and we want the maximum value
         top_n, top_i = logits.topk(1) # This might want to change to a larger number
 
+        #print("n: ", top_n)
+        #print("i: ", top_i)
+        #print("i data is: ", top_i[0].item())
+        
         # figure out what the best label correpsonds to
-        guesses.append(model.i_to_w[top_i]) # This probably needs to be done differently
+        cur_guesses = []
+        for i in range (max_guesses):
+            answer = model.i_to_w[top_i[i].item()]
+            confidence = top_n[i]
+            guess_i = [answer, confidence]
+            cur_guesses.append(guess_i) # This probably needs to be done differently
+        guesses.append(cur_guesses)
     
     return guesses
 
@@ -536,7 +554,7 @@ def train():
     ans_to_i, i_to_ans = answer_to_index(train_tokenized)
 
     # Create the model
-    model = LSTMGuesser(i_to_w= i_to_ans, w_to_i = ans_to_i, n_input = EMB_DIM, n_output = num_classes)
+    model = LSTMGuesser(longest_q, i_to_w= i_to_ans, w_to_i = ans_to_i, n_input = EMB_DIM, n_output = num_classes)
 
     # Determining if we are using cpu or gpu
     device = torch.device('cpu')
