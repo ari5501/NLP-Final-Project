@@ -476,6 +476,15 @@ def create_app(enable_batch=True):
             for guess, buzz in batch_guess_and_buzz(rnn_guesser, questions, embeddings, word_2_index)
         ])
 
+        
+    @app.route('/api/1.0/quizbowl/test', methods=['GET'])
+    def test():
+        question = request.args.get('q')
+        question = question.replace("-", " ").strip()
+        print("question: ", question)
+        guess, buzz = guess_and_buzz(rnn_guesser, question, embeddings, word_2_index)
+        return jsonify({'guess': guess, 'buzz': True if buzz else False})
+
 
     return app
 
@@ -494,7 +503,7 @@ def web(host, port, disable_batch):
     Start web server wrapping tfidf model
     """
     app = create_app(enable_batch=not disable_batch)
-    app.run(host=host, port=port, debug=False)
+    app.run(host=host, port=port, debug=True)
 
 
 @cli.command()
