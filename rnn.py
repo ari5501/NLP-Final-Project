@@ -136,7 +136,6 @@ class LSTMGuesser(nn.Module):
     def forward(self, question_text, question_len):
         print("In the forward method")
 
-        #text_embed = self.embeddings(question_text)
         #Get the output of LSTM - (output dim: batch_size x batch_max_len x lstm_hidden_dim)
         output, _ = self.lstm(question_text)
         print("output: ", output.size()) #128 x 202 x 128
@@ -149,13 +148,11 @@ class LSTMGuesser(nn.Module):
         #reshape (before passing to linear layer) so that each row contains one token 
         #essentially, flatten the output of LSTM 
         #dim will become batch_size*batch_max_len x lstm_hidden_dim
-        #reshape = out.contiguous().view(-1, out.size(2))
         reshape = out.contiguous().view(-1, out.size(2))
         
         print("reshape: ", reshape.size())
         #Get logits from the final linear layer
         logits = self.hidden(reshape)
-        #logits = self.hidden(out)
         logits = logits.view(self.n_hidden, -1, 1)
         logits = logits.squeeze()
         print("logits: ", logits.size()) # should be linear 
@@ -191,26 +188,35 @@ class LSTMGuesser(nn.Module):
 
 # Get label that corresponds to the maximum logit
 # This is definitely not correct
-def guess(model, questions_text, max_guesses):
+def guess(model, questions_text, max_guesses, embeddings, word2ind):
 
     # turn question text into feature vector - turn
     q_text = nltk.word_tokenize(questions_text)
     question_len = len(q_text)
 
     # Now have to vectorize q_text
-    x1 = torch.FloatTensor(1, question_len, EMB_DIM).zero_()
+    question_tensor = torch.FloatTensor(1, question_len, EMB_DIM).zero_()
     question_text = []
+    for q in q_text:
+        cur_word = q.lower()
+        if cur_word in word2ind:
+            vec_text[i] = embeddings[word2ind[cur_word]]
+        else:
+            token_vector = np.random.normal(scale=0.6, size=(EMB_DIM, ))
+            vec_text[i] = token_vector.tolist()
+
+    # Converting vectorized q_text to a tensor
     vec = torch.FloatTensor(question_text)
-    x1[1, :len(question_text)].copy_(vec)
+    question_tensor[1, :len(question_text)].copy_(vec)
 
     # put feature vector into the model - model(feature_vector, length)
-    logits = model(questions_text, question_len)
+    logits = model(question_tensor, question_len)
 
     # the logits returned would be an array of all the labels, and we want the maximum value
     top_n, top_i = logits.topk(1) # This might want to change to a larger number
 
     # figure out what the best label correpsonds to
-    return model.i_to_w[top_i]
+    return model.i_to_w[top_i] # This probably needs to be done differently
 
 
 
@@ -224,19 +230,20 @@ def train_model(model, checkpoint, grad_clippings, save_name, train_data_loader,
     start = time.time()
 
     for idx, batch in enumerate(train_data_loader):
+        print ("Batch ", idx)
         question_text = batch['text'].to(device)
         question_len = batch['len']
         labels = batch['labels']
-        print(question_text.size())
+        #print(question_text.size())
 
         out = model(question_text, question_len)
         optimizer.zero_grad()
-        print("out: ", out)
-        print("labels: ", labels)
+        #print("out: ", out)
+        #print("labels: ", labels)
         loss = criterion(out, labels)
-        print("back")
+        #print("back")
         loss.backward()
-        print("optimize step")
+        #print("optimize step")
         optimizer.step()
 
         clip_grad_norm_(model.parameters(), grad_clippings) 
@@ -265,7 +272,6 @@ def batchify(batch):
 
     target_labels = torch.LongTensor(label_list)
     longest_q = max(question_len)
-    print(longest_q)
     # num questions, max question len, embeddings dim
     x1 = torch.FloatTensor(len(question_len), longest_q, EMB_DIM).zero_()
     for i in range(len(question_len)):
@@ -277,7 +283,7 @@ def batchify(batch):
     return q_batch
 
 
-# Loads the embeddings if they already exist or saves them now
+# Loads the embeddings if they already exist or create and save them otherwise
 def load_fast_text_embeddings():
     # Checking if we have already loaded the vectors before
     exists = os.path.isfile('embeddings.pickle')
@@ -301,7 +307,6 @@ def load_fast_text_embeddings():
 
 
 # Loads fasttext embeddings
-# Later, consider using glove if the embeddings are a smaller dimension
 def load_vectors_wo_w2v(fname):
     os.chdir('data/')
     dirpath = os.getcwd()
@@ -369,10 +374,8 @@ def evaluate(data_loader, model, device):
     return accuracy
 
 
+# Loads the data and then tokenizes it
 def load_data(filename, lim):
-    """
-    load the json file into data list
-    """
     files = os.listdir(os.curdir)
     dataset_path=os.path.join('data', filename)
 
@@ -393,12 +396,12 @@ def load_data(filename, lim):
         for i in range(0,1280):
             q = questions[i]
             q_text = nltk.word_tokenize(q['text'])
-            #label = q['category']
             label = q['page']
             if label:
                 data.append((q_text, label))
     return data
 
+# Gets the class label to index and index to class label
 def class_labels(data):
     class_to_i = {}
     i_to_class = {}
@@ -410,6 +413,7 @@ def class_labels(data):
             i+=1
     return class_to_i, i_to_class
 
+# Loads the tokenized data if it exists, and creates it if it doesn't
 def load_tokenized_data():
     train_data_exists = os.path.isfile('train_dataset.pickle')
     if train_data_exists:
@@ -441,17 +445,32 @@ def load_tokenized_data():
 
     return training_vectors, dev_vectors
 
+
+def answer_to_index(train_tokenized):
+    answer_to_index = {}
+    index_to_answer = {}
+    index = 0
+
+    for text, answer in train_tokenized:
+        answer_to_index[answer] = index
+        index_to_answer[index] = answer 
+        index += 1
+
+    return answer_to_index, index_to_answer
+
+
 ### Begin app stuff ###
 
 
 def create_app(enable_batch=True):
     rnn_guesser = LSTMGuesser.load()
+    embeddings, w_to_i, i_to_w, words  = load_fast_text_embeddings()
     app = Flask(__name__)
 
     @app.route('/api/1.0/quizbowl/act', methods=['POST'])
     def act():
         question = request.json['text']
-        guess, buzz = guess_and_buzz(rnn_guesser, question)
+        guess, buzz = guess_and_buzz(rnn_guesser, question, embeddings, w_to_i)
         return jsonify({'guess': guess, 'buzz': True if buzz else False})
 
     @app.route('/api/1.0/quizbowl/status', methods=['GET'])
@@ -515,8 +534,10 @@ def train():
     longest_q_length = max([len(ex[0]) for ex in train_tokenized+dev_tokenized])
     print ("The longest question is size" , longest_q_length)
 
+    ans_to_i, i_to_ans = answer_to_index(train_tokenized)
+
     # Create the model
-    model = LSTMGuesser(i_to_w, w_to_i, n_input = EMB_DIM, n_output = num_classes)
+    model = LSTMGuesser(i_to_ans, ans_to_i, n_input = EMB_DIM, n_output = num_classes)
 
     # Determining if we are using cpu or gpu
     device = torch.device('cpu')
