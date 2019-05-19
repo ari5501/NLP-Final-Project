@@ -7,7 +7,6 @@ import json
 import io
 import time
 import os
-#import bcolz
 from os import path
 from pathlib import Path
 
@@ -122,9 +121,9 @@ class LSTMGuesser(nn.Module):
         #self.vocabsize = len(vocab)
 
         #self.embeddings = nn.Embedding(self.vocabsize, EMB_DIM)
-        self.lstm = nn.LSTM(self.n_input, self.n_hidden)
+        self.lstm = nn.LSTM(self.n_input, self.n_hidden, batch_first=True)
         self.dropout = nn.Dropout(dropout)
-        self.hidden = nn.Linear(self.n_hidden * 300, self.n_output) # this layer might not be needed
+        self.hidden = nn.Linear(self.n_hidden, self.n_output) # this layer might not be needed
         print("output:", n_output)
         self.softmax = nn.Softmax()
 
@@ -147,16 +146,16 @@ class LSTMGuesser(nn.Module):
 
         print("after dropout: ", out.size()) #same dims
         
-        #return out
-
         #reshape (before passing to linear layer) so that each row contains one token 
         #essentially, flatten the output of LSTM 
         #dim will become batch_size*batch_max_len x lstm_hidden_dim
-        reshape = out.contiguous().view(-1, self.n_hidden * 300)
+        #reshape = out.contiguous().view(-1, out.size(2))
+        reshape = out.contiguous().view(-1, out.size(2))
         
         print("reshape: ", reshape.size())
         #Get logits from the final linear layer
         logits = self.hidden(reshape)
+        #logits = self.hidden(out)
         logits = logits.view(self.n_hidden, -1, 1)
         logits = logits.squeeze()
         print("logits: ", logits.size()) # should be linear 
@@ -215,7 +214,7 @@ def guess(model, questions_text, max_guesses):
 
 
 
-def train_model(model, checkpoint, grad_clippings, save_name, train_data_loader, dev_data_loader, accuraacy, device):
+def train_model(model, checkpoint, grad_clippings, save_name, train_data_loader, dev_data_loader, accuracy, device):
     print ("Starting training")
     model.train()
     optimizer = torch.optim.Adamax(model.parameters())
@@ -228,11 +227,11 @@ def train_model(model, checkpoint, grad_clippings, save_name, train_data_loader,
         question_text = batch['text'].to(device)
         question_len = batch['len']
         labels = batch['labels']
-        print(question_text, question_len)
+        print(question_text.size())
 
         out = model(question_text, question_len)
         optimizer.zero_grad()
-        print("out: ", out.size())
+        print("out: ", out)
         print("labels: ", labels)
         loss = criterion(out, labels)
         print("back")
@@ -266,6 +265,7 @@ def batchify(batch):
 
     target_labels = torch.LongTensor(label_list)
     longest_q = max(question_len)
+    print(longest_q)
     # num questions, max question len, embeddings dim
     x1 = torch.FloatTensor(len(question_len), longest_q, EMB_DIM).zero_()
     for i in range(len(question_len)):
@@ -390,7 +390,7 @@ def load_data(filename, lim):
             if label:
                 data.append((q_text, label))
         '''
-        for i in range(0,200):
+        for i in range(0,1280):
             q = questions[i]
             q_text = nltk.word_tokenize(q['text'])
             #label = q['category']
@@ -409,6 +409,37 @@ def class_labels(data):
             i_to_class[i] = ans
             i+=1
     return class_to_i, i_to_class
+
+def load_tokenized_data():
+    train_data_exists = os.path.isfile('train_dataset.pickle')
+    if train_data_exists:
+        print ("Loading training vectors")
+        with open('train_dataset.pickle', 'rb') as f:
+            params = pickle.load(f)
+            training_vectors = params['train_data']
+    else:
+        print ("Creating dev vectors")
+        training_vectors = load_data('qanta.train.2018.04.18.json', -1)
+        with open('train_dataset.pickle', 'wb') as f:
+            pickle.dump({
+                'train_data' : training_vectors
+            }, f)
+
+    dev_data_exists = os.path.isfile('dev_dataset.pickle')
+    if dev_data_exists:
+        print ("Loading dev vectors")
+        with open('dev_dataset.pickle', 'rb') as f:
+            params = pickle.load(f)
+            dev_vectors = params['dev_data']
+    else:
+        print ("Creating dev vectors")
+        dev_vectors = load_data('qanta.dev.2018.04.18.json', -1)
+        with open('dev_dataset.pickle', 'wb') as f:
+            pickle.dump({
+                'dev_data' : dev_vectors
+            }, f)
+
+    return training_vectors, dev_vectors
 
 ### Begin app stuff ###
 
@@ -463,12 +494,6 @@ def web(host, port, disable_batch):
 
 @cli.command()
 def train():
-
-    # Ininitalize the dataset
-    dataset = QuizBowlDataset(guesser_train=True)
-    training_data = dataset.training_data()
-    dev_data = get_dev_data(dataset)
-
     # Change these later, but these are random variable initializers
     checkpoint = 50
     grad_clippings = 5
@@ -478,56 +503,34 @@ def train():
 
 
     # Getting all of the data and tokenizing it
-    train_data_exists = os.path.isfile('train_dataset.pickle')
-    if train_data_exists:
-        print ("Loading training vectors")
-        with open('train_dataset.pickle', 'rb') as f:
-            params = pickle.load(f)
-            training_vectors = params['train_data']
-    else:
-        print ("Creating dev vectors")
-        training_vectors = load_data('qanta.train.2018.04.18.json', -1)
-        with open('train_dataset.pickle', 'wb') as f:
-            pickle.dump({
-                'train_data' : training_vectors
-            }, f)
-
-    dev_data_exists = os.path.isfile('dev_dataset.pickle')
-    if dev_data_exists:
-        print ("Loading dev vectors")
-        with open('dev_dataset.pickle', 'rb') as f:
-            params = pickle.load(f)
-            dev_vectors = params['dev_data']
-    else:
-        print ("Creating dev vectors")
-        dev_vectors = load_data('qanta.dev.2018.04.18.json', -1)
-        with open('dev_dataset.pickle', 'wb') as f:
-            pickle.dump({
-                'dev_data' : dev_vectors
-            }, f)
+    train_tokenized, dev_tokenized = load_tokenized_data()
     
     # Getting the number of possible answers
-    num_classes = len(list(set([ex[1] for ex in training_vectors+dev_vectors])))
+    num_classes = len(list(set([ex[1] for ex in train_tokenized+dev_tokenized])))
 
     # Getting fast text embeddings
     embeddings, w_to_i, i_to_w, words = load_fast_text_embeddings()
 
+    # Getting the length of the longest question
+    longest_q_length = max([len(ex[0]) for ex in train_tokenized+dev_tokenized])
+    print ("The longest question is size" , longest_q_length)
+
     # Create the model
-    model = LSTMGuesser(i_to_w, w_to_i, n_input = 300, n_output = num_classes)
+    model = LSTMGuesser(i_to_w, w_to_i, n_input = EMB_DIM, n_output = num_classes)
 
     # Determining if we are using cpu or gpu
     device = torch.device('cpu')
 
-    class_to_ind, ind_to_class = class_labels(training_vectors+dev_vectors)
+    class_to_ind, ind_to_class = class_labels(train_tokenized+dev_tokenized)
 
     # Converting our training and dev data into dataloaders which work well with training our RNN
-    train_dataset = QuestionDataset(training_vectors, w_to_i, num_classes, embeddings, class_to_ind)
-    train_sampler = torch.utils.data.sampler.RandomSampler(training_vectors)
+    train_dataset = QuestionDataset(train_tokenized, w_to_i, num_classes, embeddings, class_to_ind)
+    train_sampler = torch.utils.data.sampler.RandomSampler(train_tokenized)
 
 
-    dev_dataset = QuestionDataset(dev_vectors, w_to_i, num_classes, embeddings, class_to_ind)
-    dev_sampler = torch.utils.data.sampler.RandomSampler(dev_vectors)
-    dev_loader = DataLoader(dev_vectors, batch_size=batch_size, sampler=dev_sampler, num_workers=0,
+    dev_dataset = QuestionDataset(dev_tokenized, w_to_i, num_classes, embeddings, class_to_ind)
+    dev_sampler = torch.utils.data.sampler.RandomSampler(dev_tokenized)
+    dev_loader = DataLoader(dev_tokenized, batch_size=batch_size, sampler=dev_sampler, num_workers=0,
                                            collate_fn=batchify)
 
     # Here we are actually running the guesser and training it
@@ -539,6 +542,7 @@ def train():
         accuracy = train_model(model, checkpoint, grad_clippings, save_name, train_loader, dev_loader, accuracy, device)
 
     # Save the model now
+    print("Done training")
     model.save()
 
 
