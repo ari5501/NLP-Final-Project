@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 import click
 import numpy as np
 import nltk
-nltk.download('punkt')
+#nltk.download('punkt')
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from flask import Flask, jsonify, request
@@ -34,15 +34,15 @@ BUZZ_THRESHOLD = 0.3
 EMB_DIM = 300
 
 
-def guess_and_buzz(model, question_text) -> Tuple[str, bool]:
-    guesses = guess(model, [question_text], BUZZ_NUM_GUESSES)[0]
+def guess_and_buzz(model, question_text, embeddings, word_2_index) -> Tuple[str, bool]:
+    guesses = guess(model, [question_text], BUZZ_NUM_GUESSES, embeddings, word_2_index)[0]
     scores = [guess[1] for guess in guesses]
     buzz = scores[0] / sum(scores) >= BUZZ_THRESHOLD
     return guesses[0][0], buzz
 
 
-def batch_guess_and_buzz(model, questions) -> List[Tuple[str, bool]]:
-    question_guesses = model.guess(questions, BUZZ_NUM_GUESSES)
+def batch_guess_and_buzz(model, questions, embeddings, word_2_index) -> List[Tuple[str, bool]]:
+    question_guesses = guess(model, questions, BUZZ_NUM_GUESSES, embeddings, word_2_index)
     outputs = []
     for guesses in question_guesses:
         scores = [guess[1] for guess in guesses]
@@ -112,7 +112,7 @@ def class_labels(data):
 class LSTMGuesser(nn.Module):
     # n_input represents dimensionality of each word embedding as a vector 
     # n_output is number of answers (unique)
-    def __init__(self, i_to_w, w_to_i, n_input = 100, n_hidden = 128, n_output = 300, dropout = 0.3):
+    def __init__(self, i_to_w = None, w_to_i = None, n_input = 100, n_hidden = 128, n_output = 300, dropout = 0.3):
         super(LSTMGuesser, self).__init__()
         
         self.n_input = n_input  # size of longest question
@@ -193,9 +193,10 @@ def guess(model, questions_text, max_guesses, embeddings, word2ind):
 
         # Now have to vectorize q_text
         question_tensor = torch.FloatTensor(1, question_len, EMB_DIM).zero_()
+        vec_text = [0] * question_len
         question_text = []
-        for q in q_text:
-            cur_word = q.lower()
+        for i in range(len(q_text)):
+            cur_word = q_text[i].lower()
             if cur_word in word2ind:
                 vec_text[i] = embeddings[word2ind[cur_word]]
             else:
@@ -204,7 +205,7 @@ def guess(model, questions_text, max_guesses, embeddings, word2ind):
 
         # Converting vectorized q_text to a tensor
         vec = torch.FloatTensor(question_text)
-        question_tensor[1, :len(question_text)].copy_(vec)
+        question_tensor[0, :len(question_text)].copy_(vec)
 
         # put feature vector into the model - model(feature_vector, length)
         logits = model(question_tensor, question_len)
@@ -476,13 +477,12 @@ def web(host, port, disable_batch):
 
 @cli.command()
 def train():
-    # Change these later, but these are random variable initializers
+    # Random variable initializers
     checkpoint = 50
     grad_clippings = 5
     batch_size = 128
     epochs = 5
     save_name = 'rnn.pt'
-
 
     # Getting all of the data and tokenizing it
     train_tokenized, dev_tokenized = load_tokenized_data()
@@ -497,10 +497,11 @@ def train():
     longest_q_length = max([len(ex[0]) for ex in train_tokenized+dev_tokenized])
     print ("The longest question is size" , longest_q_length)
 
+    # Creating a mapping of indices to answers for the guess method
     ans_to_i, i_to_ans = answer_to_index(train_tokenized)
 
     # Create the model
-    model = LSTMGuesser(i_to_ans, ans_to_i, n_input = EMB_DIM, n_output = num_classes)
+    model = LSTMGuesser(i_to_w= i_to_ans, w_to_i = ans_to_i, n_input = EMB_DIM, n_output = num_classes)
 
     # Determining if we are using cpu or gpu
     device = torch.device('cpu')
