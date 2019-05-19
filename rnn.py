@@ -20,6 +20,7 @@ import click
 import numpy as np
 import nltk
 #nltk.download('punkt')
+nltk.download('averaged_perceptron_tagger')
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from flask import Flask, jsonify, request
@@ -410,6 +411,7 @@ def load_data(filename, lim):
                 data.append((q_text, label))
     return data
 
+# Using this for the guesser where we get an index to relate it to a word
 def answer_to_index(train_tokenized):
     answer_to_index = {}
     index_to_answer = {}
@@ -422,6 +424,26 @@ def answer_to_index(train_tokenized):
 
     return answer_to_index, index_to_answer
 
+
+def pos_tag(tokenized_data):
+    index = 0
+    new_data = []
+    try:
+        for question, label in tokenized_data:
+            tagged = nltk.pos_tag(question)
+
+            chunkGram = r"""Chunk: {<RB.?>*<VB.?>*<NNP>}"""
+            chunkParser = nltk.RegexpParser(chunkGram)
+
+            chunked = chunkParser.parse(tagged)
+            #chunked.draw()
+            new_data.append((chunked, label))
+            
+    except Exception as e:
+        index += 1
+    
+    #print (new_data)
+    return new_data
 
 ### Begin app stuff ###
 
@@ -486,7 +508,11 @@ def train():
 
     # Getting all of the data and tokenizing it
     train_tokenized, dev_tokenized = load_tokenized_data()
-    
+
+    # POS tagging
+    train_tags = pos_tag(train_tokenized)
+    dev_tags = pos_tag(dev_tokenized)
+
     # Getting the number of possible answers
     num_classes = len(list(set([ex[1] for ex in train_tokenized+dev_tokenized])))
 
